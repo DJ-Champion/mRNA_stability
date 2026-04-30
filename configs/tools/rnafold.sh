@@ -56,7 +56,7 @@ predict_wall_s() {
     local measured=$1 tier=$2
     read -ra arr <<< "$TIER_SHUFFLES"
     local n=${arr[$((tier-1))]}
-    awk -v m="$measured" -v n="$n" 'BEGIN { printf "%d", m * (n + 1) + 0.5 }'
+    awk -v m="$measured" -v n="$n" 'BEGIN { printf "%d", (m + 1) * (n + 1) + 1 }'
 }
 
 # Streaming pipe — peak RSS is per-sequence, doesn't scale with N.
