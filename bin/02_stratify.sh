@@ -1,21 +1,28 @@
 #!/bin/bash
 # 02_stratify.sh
-# Bin sequences from multifastas into 10 length tiers, using lengths
-# already computed by 01_extract.py and stored in manifest.tsv.
+# Bin sequences from multifastas into 10 length tiers. Tier assignment uses
+# lengths already in manifest.tsv (no re-scanning).
 #
-# Outputs:
-#   lists/tier_<n>/<seqname>.fa   individual FASTA per sequence (the working copy)
-#   lists/tier_<n>.txt            list of paths (consumed by 04_submit.sh)
-#   lists/.lengths.tsv            cached length info (used by 03_calibrate.sh)
+# Outputs (under $LISTS_DIR = $RUN_DIR/lists):
+#   tier_<n>/<seqname>.fa   individual FASTA per sequence (working copy)
+#   tier_<n>.txt            list of paths (consumed by 04_submit.sh)
+#   .lengths.tsv            cached length info (used by 03_calibrate.sh)
 #
-# Auto-invalidates: if the manifest is newer than the existing tier_<n> dirs,
-# they are wiped and rebuilt. Override with --no-invalidate.
+# Auto-invalidates: if manifest is newer than the existing tier dirs they
+# are wiped and rebuilt. Override with --no-invalidate.
+#
+# Usage:
+#   ./bin/02_stratify.sh --dataset human_liver
+#   ./bin/02_stratify.sh -d human_liver --no-invalidate
 
 set -euo pipefail
-source "$(dirname "$0")/../config/config.main.sh"
+source "$(dirname "$0")/../lib/paths.sh"
+parse_pipeline_args "$@"
+resolve_paths
 
+# Tool-agnostic step: TOOL not required.
 NO_INVALIDATE=0
-for arg in "$@"; do
+for arg in "${PASSTHROUGH_ARGS[@]:-}"; do
     case "$arg" in
         --no-invalidate) NO_INVALIDATE=1 ;;
         -h|--help)
@@ -26,7 +33,7 @@ done
 
 [[ -s "$MANIFEST_TSV" ]] || {
     echo "ERROR: manifest not found at $MANIFEST_TSV" >&2
-    echo "Run 01_extract.py first." >&2
+    echo "Run 01_extract.py --dataset $DATASET first." >&2
     exit 1
 }
 
@@ -36,73 +43,58 @@ read -ra bounds <<< "$TIER_BOUNDS"
     exit 1
 }
 
+mkdir -p "$LISTS_DIR"
+
 # --- Auto-invalidate stale tier dirs ---
 if (( NO_INVALIDATE == 0 )); then
     needs_rebuild=0
-    if [[ ! -f "$TIER_ROOT/.lengths.tsv" ]]; then
+    if [[ ! -f "$LISTS_DIR/.lengths.tsv" ]]; then
         needs_rebuild=1
-    elif [[ "$MANIFEST_TSV" -nt "$TIER_ROOT/.lengths.tsv" ]]; then
+    elif [[ "$MANIFEST_TSV" -nt "$LISTS_DIR/.lengths.tsv" ]]; then
         echo "Manifest newer than tier cache — rebuilding tiers."
         needs_rebuild=1
     fi
     if (( needs_rebuild )); then
         for i in $(seq 1 10); do
-            rm -rf "$TIER_ROOT/tier_${i}" "$TIER_ROOT/tier_${i}.txt"
+            rm -rf "$LISTS_DIR/tier_${i}" "$LISTS_DIR/tier_${i}.txt"
         done
     fi
 fi
 
 # --- Prepare tier dirs and lists ---
 for i in $(seq 1 10); do
-    mkdir -p "$TIER_ROOT/tier_${i}"
-    : > "$TIER_ROOT/tier_${i}.txt"
+    mkdir -p "$LISTS_DIR/tier_${i}"
+    : > "$LISTS_DIR/tier_${i}.txt"
 done
-length_cache="$TIER_ROOT/.lengths.tsv"
+length_cache="$LISTS_DIR/.lengths.tsv"
 : > "$length_cache"
 
-# --- Build a seqname -> region lookup so we can find the source multifasta ---
-# manifest.tsv columns: seqname, gene_id, transcript_id, region, length, ...
+# --- Build a region-of-seq lookup ---
 declare -A REGION_OF
-declare -A LEN_OF
 while IFS=$'\t' read -r seqname gene_id tx_id region length rest; do
-    [[ "$seqname" == "seqname" ]] && continue   # header
+    [[ "$seqname" == "seqname" ]] && continue
     REGION_OF["$seqname"]="$region"
-    LEN_OF["$seqname"]="$length"
 done < "$MANIFEST_TSV"
 
 echo "Loaded ${#REGION_OF[@]} sequences from manifest."
 
-# --- Stream each multifasta once, splitting records into tier dirs ---
-# Group seqnames by region so each multifasta is read exactly once.
+# --- Group seqnames by region so each multifasta is read exactly once ---
 declare -A SEQS_BY_REGION
 for seqname in "${!REGION_OF[@]}"; do
     region="${REGION_OF[$seqname]}"
     SEQS_BY_REGION[$region]+="$seqname"$'\n'
 done
 
-assign_tier() {
-    local len=$1
-    local i
-    for i in $(seq 0 8); do
-        if (( len < bounds[i] )); then
-            echo $((i + 1))
-            return
-        fi
-    done
-    echo 10
-}
-
+# --- Stream each multifasta and split records into tier dirs ---
 for region in "${!SEQS_BY_REGION[@]}"; do
-    mfa="$MULTIFASTA_DIR/extracted_${region}.fa"
+    mfa="$EXTRACT_DIR/extracted_${region}.fa"
     [[ -s "$mfa" ]] || {
         echo "WARNING: multifasta missing for region '$region': $mfa" >&2
         continue
     }
 
-    awk -v cache="$length_cache" -v root="$TIER_ROOT" -v bounds_str="$TIER_BOUNDS" '
-        BEGIN {
-            n = split(bounds_str, b, " ")
-        }
+    awk -v cache="$length_cache" -v root="$LISTS_DIR" -v bounds_str="$TIER_BOUNDS" '
+        BEGIN { n = split(bounds_str, b, " ") }
         function assign_tier(len,    i) {
             for (i = 1; i <= 9; i++) if (len < b[i]) return i
             return 10
@@ -139,7 +131,7 @@ for i in $(seq 1 10); do
     else
         range=">${prev}"
     fi
-    count=$(wc -l < "$TIER_ROOT/tier_${i}.txt")
+    count=$(awk 'END{print NR}' "$LISTS_DIR/tier_${i}.txt")
     total=$((total + count))
     printf "%-5d %-16s %d\n" "$i" "$range" "$count"
 done

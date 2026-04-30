@@ -1,40 +1,40 @@
 #!/bin/bash
 # find_missing.sh
-# Print paths to FASTAs whose RNAfold output is missing or incomplete.
+# Print paths to FASTAs whose tool output is missing or incomplete.
 # Pipe to a file and feed back through 04_submit.sh for resubmission.
 #
 # Usage:
-#   ./bin/find_missing.sh                       # check all tier lists
-#   ./bin/find_missing.sh lists/tier_5.txt      # check one specific list
+#   ./bin/find_missing.sh -d human_liver -t rnafold                       # check all tiers
+#   ./bin/find_missing.sh -d human_liver -t rnafold --list lists/tier_5.txt  # one list
 #
-# Example resume workflow:
-#   ./bin/find_missing.sh > lists/redo.txt
-#   FASTA_LIST=lists/redo.txt N_SHUFFLES=1000 \
-#     SLURM_TIME=00:30:00 SLURM_MEM_PER_CPU=500MB ./bin/04_submit.sh
+# Resume workflow:
+#   ./bin/find_missing.sh -d human_liver -t rnafold > redo.txt
+#   ./bin/04_submit.sh -d human_liver -t rnafold --list redo.txt
 
 set -euo pipefail
-source "$(dirname "$0")/../config/config.main.sh"
+source "$(dirname "$0")/../lib/paths.sh"
+parse_pipeline_args "$@"
+resolve_paths
+
+[[ -n "$TOOL" ]] || { echo "ERROR: --tool required" >&2; exit 1; }
 
 check_one_list() {
     local list="$1"
     [[ -s "$list" ]] || return 0
-
-    while read -r fasta; do
-        local seq_name
+    while IFS= read -r fasta; do
+        local seq_name out
         seq_name=$(basename "$fasta" .fa)
-        local out="$RESULTS_DIR/results_${seq_name}.csv"
-        if [[ ! -s "$out" ]] || (( $(wc -l < "$out") < 2 )); then
+        out="$RESULTS_DIR/results_${seq_name}.csv"
+        if [[ ! -s "$out" ]] || (( $(awk 'END{print NR}' "$out") < 2 )); then
             echo "$fasta"
         fi
     done < "$list"
 }
 
-if (( $# > 0 )); then
-    for list in "$@"; do
-        check_one_list "$list"
-    done
+if [[ -n "$EXPLICIT_LIST" ]]; then
+    check_one_list "$EXPLICIT_LIST"
 else
     for i in $(seq 1 10); do
-        check_one_list "$TIER_ROOT/tier_${i}.txt"
+        check_one_list "$LISTS_DIR/tier_${i}.txt"
     done
 fi

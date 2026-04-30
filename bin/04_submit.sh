@@ -2,70 +2,82 @@
 # 04_submit.sh
 # Submit SLURM array jobs. Two modes:
 #
-# (1) Submit ALL tiers using calibration recommendations:
-#       ./bin/04_submit.sh
+# (1) Submit ALL tiers using calibration recommendations (default):
+#       ./bin/04_submit.sh -d human_liver -t rnafold
 #
-# (2) Submit a specific list (overrides), e.g. for resubmissions:
-#       FASTA_LIST=lists/redo.txt N_SHUFFLES=1000 \
-#         SLURM_TIME=00:30:00 SLURM_MEM_PER_CPU=500MB ./bin/04_submit.sh
+# (2) Submit a specific list (overrides calibration), e.g. resubmissions:
+#       ./bin/04_submit.sh -d human_liver -t rnafold --list lists/redo.txt \
+#           SLURM_TIME=00:30:00 SLURM_MEM_PER_CPU=500MB
+#       (or set those as env vars before the call)
 
 set -euo pipefail
-source "$(dirname "$0")/../config/config.main.sh"
+source "$(dirname "$0")/../lib/paths.sh"
+parse_pipeline_args "$@"
+resolve_paths
+
+[[ -n "$TOOL" ]] || { echo "ERROR: --tool required" >&2; exit 1; }
 
 mkdir -p "$SLURM_LOG_DIR"
 
 submit_array() {
-    local fasta_list="$1"
-    local n_shuffles="$2"
-    local slurm_time="$3"
-    local slurm_mem="$4"
-    local tag="${5:-}"
+    local fasta_list="$1" rec_time="$2" rec_mem="$3" tag="$4" tier="${5:-}"
 
     [[ -s "$fasta_list" ]] || { echo "Empty/missing list: $fasta_list — skipping"; return; }
 
-    local total
-    total=$(wc -l < "$fasta_list")
-    local last_idx=$((total - 1))
-    local array_spec="0-${last_idx}%${CONCURRENT_LIMIT}"
+    local total last_idx array_spec
+    total=$(awk 'END{print NR}' "$fasta_list")
+    last_idx=$((total - 1))
+    array_spec="0-${last_idx}%${CONCURRENT_LIMIT}"
 
-    echo "Submitting: list=$fasta_list  n=$total  shuffles=$n_shuffles  time=$slurm_time  mem=$slurm_mem  ${tag:+[tag=$tag]}"
+    # Tool's per-tier env contribution (e.g. N_SHUFFLES=1000 for rnafold).
+    # Empty for custom-list mode (caller's env flows through via --export=ALL).
+    local extra_export=""
+    [[ -n "$tier" ]] && extra_export=$(tier_params "$tier")
+
+    local export_str="ALL,DATASET=$DATASET,TOOL=$TOOL,FASTA_LIST=$fasta_list,PROJECT_ROOT=$PROJECT_ROOT"
+    [[ -n "$extra_export" ]] && export_str="$export_str,$extra_export"
+
+    echo "Submitting: list=$(basename "$fasta_list")  n=$total  time=$rec_time  mem=$rec_mem${extra_export:+  [$extra_export]}  [tag=$tag]"
 
     sbatch \
-        --job-name="${SLURM_JOB_NAME}${tag:+_$tag}" \
+        --job-name="${SLURM_JOB_NAME}_${TOOL}_${tag}" \
         --partition="$SLURM_PARTITION" \
-        --time="$slurm_time" \
-        --mem-per-cpu="$slurm_mem" \
+        --time="$rec_time" \
+        --mem-per-cpu="$rec_mem" \
         --cpus-per-task="$SLURM_CPUS_PER_TASK" \
         --array="$array_spec" \
-        --export=ALL,FASTA_LIST="$fasta_list",N_SHUFFLES="$n_shuffles" \
-        slurm/rnafold.sbatch
+        --output="$SLURM_LOG_DIR/${TOOL}_%A_%a.out" \
+        --error="$SLURM_LOG_DIR/${TOOL}_%A_%a.err" \
+        --export="$export_str" \
+        "$PROJECT_ROOT/slurm/array.sbatch"
 }
 
-# --- Mode 1: explicit list via env ---
-if [[ "${FASTA_LIST:-}" != "" && -s "${FASTA_LIST}" ]] \
-   && [[ "${FASTA_LIST}" != "lists/tier_"*.txt || -n "${FORCE_LIST:-}" ]]; then
-    # User specified an explicit list (resubmission, custom run)
-    submit_array "$FASTA_LIST" "$N_SHUFFLES" "$SLURM_TIME" "$SLURM_MEM_PER_CPU" "custom"
+# --- Mode 1: explicit list ---
+if [[ -n "$EXPLICIT_LIST" ]]; then
+    [[ -s "$EXPLICIT_LIST" ]] || { echo "ERROR: list not found or empty: $EXPLICIT_LIST" >&2; exit 1; }
+    submit_array "$EXPLICIT_LIST" "$SLURM_TIME" "$SLURM_MEM_PER_CPU" "custom"
     exit 0
 fi
 
 # --- Mode 2: submit all tiers from calibration ---
-recs="${CALIBRATION_ROOT}/latest/recommendations.tsv"
+recs="$CALIBRATION_ROOT/latest/recommendations.tsv"
 if [[ ! -s "$recs" ]]; then
     echo "ERROR: no calibration recommendations at $recs" >&2
-    echo "Run 03_calibrate.sh first, or submit explicitly with FASTA_LIST=...\n" >&2
+    echo "Run 03_calibrate.sh first, or submit explicitly with --list <file>." >&2
     exit 1
 fi
 
 echo "Reading calibration recommendations from: $recs"
 echo
 
-# recommendations.tsv columns: tier  n_shuffles  n_samples  max_len  max_wall_s  max_rss_mb  rec_time  rec_mem
-while IFS=$'\t' read -r tier n_shuf n_samples max_len max_wall max_rss rec_time rec_mem; do
-    [[ "$tier" == "tier" ]] && continue   # header
-    list="$TIER_ROOT/tier_${tier}.txt"
-    submit_array "$list" "$n_shuf" "$rec_time" "$rec_mem" "t${tier}"
+# recommendations.tsv columns:
+#   tier  n_samples  max_len  measured_wall_s  measured_rss_mb
+#   predicted_wall_s  predicted_rss_mb  rec_time  rec_mem
+while IFS=$'\t' read -r tier n_samples max_len meas_wall meas_rss pred_wall pred_rss rec_time rec_mem; do
+    [[ "$tier" == "tier" ]] && continue
+    list="$LISTS_DIR/tier_${tier}.txt"
+    submit_array "$list" "$rec_time" "$rec_mem" "t${tier}" "$tier"
 done < "$recs"
 
 echo
-echo "All tier submissions queued. Monitor: squeue -u $USER --name=${SLURM_JOB_NAME}*"
+echo "All tier submissions queued. Monitor: squeue -u \$USER --name=${SLURM_JOB_NAME}_${TOOL}_*"

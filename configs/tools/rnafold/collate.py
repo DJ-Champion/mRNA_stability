@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-05_collate.py
-Combine per-sequence RNAfold result CSVs into one table per metric source.
-Joins with manifest.tsv so the output has gene/transcript/region context.
+tools/rnafold/collate.py
+Combine per-sequence RNAfold result CSVs into one TSV per dataset, joined
+with the manifest so output has gene/transcript/region context.
+
+Required env (set by bin/05_collate.sh -> resolve_paths):
+  RESULTS_DIR, MANIFEST_TSV, TOOL_DIR
+Optional flags (after pipeline args):
+  --include-raw-shuffles   also concatenate raw shuffle CSVs (large)
 
 Outputs:
-  results/combined_rnafold.tsv          # one row per sequence, all RNAfold cols
-  results/combined_rnafold_raw_shuffles.tsv  (optional, large)
-
-Designed for join-at-analysis-time in R:
-  manifest <- read_tsv("extracted_regions/manifest.tsv")
-  rnafold  <- read_tsv("results/combined_rnafold.tsv")
-  gc       <- read_tsv("results/combined_gc.tsv")        # future metrics
-  full     <- manifest |> left_join(rnafold) |> left_join(gc)
+  $TOOL_DIR/combined.tsv                   one row per sequence
+  $TOOL_DIR/combined_raw_shuffles.tsv      optional, large
 """
 import argparse
 import csv
@@ -27,18 +26,18 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 
-def collate_rnafold(results_dir: str, manifest_path: str, out_path: str):
-    """Concatenate per-sequence result CSVs, attach manifest metadata."""
-    manifest = {}
-    if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            r = csv.DictReader(f, delimiter='\t')
-            for row in r:
-                manifest[row['seqname']] = row
-        logging.info(f"Loaded manifest: {len(manifest)} records")
-    else:
-        logging.warning(f"Manifest not found: {manifest_path} — output will lack metadata")
 
+def load_manifest(path):
+    if not os.path.exists(path):
+        logging.warning(f"Manifest not found: {path} — output will lack metadata")
+        return {}
+    with open(path) as f:
+        rows = list(csv.DictReader(f, delimiter='\t'))
+    logging.info(f"Loaded manifest: {len(rows)} records")
+    return {row['seqname']: row for row in rows}
+
+
+def collate_results(results_dir, manifest, out_path):
     pattern = os.path.join(results_dir, "results_*.csv")
     files = sorted(glob(pattern))
     if not files:
@@ -46,8 +45,6 @@ def collate_rnafold(results_dir: str, manifest_path: str, out_path: str):
         sys.exit(1)
     logging.info(f"Found {len(files)} result files")
 
-    # Build the combined table. Headers come from the first file; we add
-    # manifest columns on the left for join convenience in R.
     manifest_cols = ['gene_id', 'transcript_id', 'region', 'length',
                      'selection_reason', 'short_utrs']
 
@@ -61,7 +58,6 @@ def collate_rnafold(results_dir: str, manifest_path: str, out_path: str):
                     seqname = row['seq_name']
                     meta = manifest.get(seqname, {})
 
-                    # Compose the output row: manifest cols first, then results
                     out_row = {'seqname': seqname}
                     for c in manifest_cols:
                         out_row[c] = meta.get(c, '')
@@ -81,19 +77,12 @@ def collate_rnafold(results_dir: str, manifest_path: str, out_path: str):
 
     logging.info(f"Wrote {written} rows to {out_path}")
 
-def collate_raw_shuffles(raw_dir: str, manifest_path: str, out_path: str):
-    """Concatenate per-sequence raw shuffle CSVs. Large file — opt in."""
-    manifest = {}
-    if os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            r = csv.DictReader(f, delimiter='\t')
-            for row in r:
-                manifest[row['seqname']] = row
 
+def collate_raw_shuffles(raw_dir, manifest, out_path):
     pattern = os.path.join(raw_dir, "*_raw_shuffles.csv")
     files = sorted(glob(pattern))
     if not files:
-        logging.error(f"No raw shuffle files matched: {pattern}")
+        logging.warning(f"No raw shuffle files matched: {pattern}")
         return
     logging.info(f"Found {len(files)} raw shuffle files")
 
@@ -125,31 +114,32 @@ def collate_raw_shuffles(raw_dir: str, manifest_path: str, out_path: str):
 
     logging.info(f"Wrote {written} rows to {out_path}")
 
+
 def main():
     parser = argparse.ArgumentParser(description="Collate RNAfold per-sequence outputs")
-    parser.add_argument('--results-dir',
-                        default=os.environ.get('RESULTS_DIR', 'results/rnafold'))
-    parser.add_argument('--raw-dir',
-                        default=os.environ.get('RAW_SHUFFLES_DIR',
-                                                'results/rnafold_raw_shuffles'))
-    parser.add_argument('--manifest',
-                        default=os.environ.get('MANIFEST_TSV',
-                                                'extracted_regions/manifest.tsv'))
-    parser.add_argument('--out-dir', default='results',
-                        help='Where to write combined tables')
     parser.add_argument('--include-raw-shuffles', action='store_true',
                         help='Also collate raw shuffle CSVs (large output)')
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    results_dir = os.environ.get('RESULTS_DIR')
+    manifest_path = os.environ.get('MANIFEST_TSV')
+    tool_dir = os.environ.get('TOOL_DIR')
+    if not (results_dir and manifest_path and tool_dir):
+        logging.error("RESULTS_DIR, MANIFEST_TSV, and TOOL_DIR must be set "
+                      "(invoke via bin/05_collate.sh).")
+        sys.exit(1)
 
-    collate_rnafold(args.results_dir, args.manifest,
-                    os.path.join(args.out_dir, 'combined_rnafold.tsv'))
+    os.makedirs(tool_dir, exist_ok=True)
+    manifest = load_manifest(manifest_path)
+
+    collate_results(results_dir, manifest,
+                    os.path.join(tool_dir, 'combined.tsv'))
 
     if args.include_raw_shuffles:
-        collate_raw_shuffles(args.raw_dir, args.manifest,
-                             os.path.join(args.out_dir,
-                                          'combined_rnafold_raw_shuffles.tsv'))
+        raw_dir = os.path.join(tool_dir, 'raw_shuffles')
+        collate_raw_shuffles(raw_dir, manifest,
+                             os.path.join(tool_dir, 'combined_raw_shuffles.tsv'))
+
 
 if __name__ == '__main__':
     main()
