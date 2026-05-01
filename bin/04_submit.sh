@@ -70,12 +70,42 @@ fi
 echo "Reading calibration recommendations from: $recs"
 echo
 
+# Helper: filter a tier list to seqnames whose region is in TOOL_REGIONS.
+# Echoes the path of a filtered list (in $LISTS_DIR) — or the original list
+# if no filter is set. Returns nonzero if the filtered list is empty.
+filter_list_by_region() {
+    local input_list="$1"
+    if [[ -z "${TOOL_REGIONS:-}" ]]; then
+        echo "$input_list"; return 0
+    fi
+    local filtered="$LISTS_DIR/.${TOOL}_$(basename "$input_list")"
+    awk -F'\t' -v allowed="$TOOL_REGIONS" '
+        BEGIN { m = split(allowed, arr, " "); for (i=1;i<=m;i++) ok[arr[i]] = 1 }
+        # First file: manifest. Header has $1 == "seqname"; skip.
+        NR == FNR {
+            if ($1 != "seqname" && ($4 in ok)) keep[$1] = 1
+            next
+        }
+        # Second file: tier list of FASTA paths. Match basename without .fa.
+        {
+            seq = $0; sub(/.*\//, "", seq); sub(/\.fa$/, "", seq)
+            if (seq in keep) print
+        }
+    ' "$MANIFEST_TSV" "$input_list" > "$filtered"
+    [[ -s "$filtered" ]] || return 1
+    echo "$filtered"
+}
+
 # recommendations.tsv columns:
 #   tier  n_samples  max_len  measured_wall_s  measured_rss_mb
 #   predicted_wall_s  predicted_rss_mb  rec_time  rec_mem
 while IFS=$'\t' read -r tier n_samples max_len meas_wall meas_rss pred_wall pred_rss rec_time rec_mem; do
     [[ "$tier" == "tier" ]] && continue
     list="$LISTS_DIR/tier_${tier}.txt"
+    if ! list=$(filter_list_by_region "$list"); then
+        echo "Tier $tier: no seqnames match TOOL_REGIONS=${TOOL_REGIONS:-<all>} — skipping"
+        continue
+    fi
     submit_array "$list" "$rec_time" "$rec_mem" "t${tier}" "$tier"
 done < "$recs"
 

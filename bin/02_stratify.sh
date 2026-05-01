@@ -116,7 +116,8 @@ for region in "${!SEQS_BY_REGION[@]}"; do
         continue
     }
 
-    awk -v cache="$length_cache" -v root="$LISTS_DIR" -v bounds_str="$TIER_BOUNDS" '
+    awk -v cache="$length_cache" -v root="$LISTS_DIR" \
+        -v bounds_str="$TIER_BOUNDS" -v region="$region" '
         BEGIN { n = split(bounds_str, b, " ") }
         function assign_tier(len,    i) {
             for (i = 1; i <= 9; i++) if (len < b[i]) return i
@@ -134,7 +135,8 @@ for region in "${!SEQS_BY_REGION[@]}"; do
             }
             close(path)
             print path >> list
-            print len "\t" name "\t" tier >> cache
+            # cache columns: length  seqname  tier  region
+            print len "\t" name "\t" tier "\t" region >> cache
         }
         /^>/ {
             flush()

@@ -94,9 +94,18 @@ for tier in $(seq 1 10); do
     [[ -s "$list" ]] || { echo "Tier $tier: empty — skipping"; continue; }
 
     # Pick the SAMPLES_PER_TIER longest sequences from this tier.
-    # Lengths cache rows: <length>\t<seqname>\t<tier>
-    samples=$(awk -F'\t' -v t="$tier" -v n="$SAMPLES_PER_TIER" '
-        $3 == t {
+    # Lengths cache rows: <length>\t<seqname>\t<tier>\t<region>
+    # If TOOL_REGIONS is set, only consider those regions.
+    samples=$(awk -F'\t' -v t="$tier" -v n="$SAMPLES_PER_TIER" \
+                  -v allowed="${TOOL_REGIONS:-}" '
+        BEGIN {
+            if (allowed != "") {
+                m = split(allowed, arr, " ")
+                for (i = 1; i <= m; i++) ok[arr[i]] = 1
+                filter = 1
+            }
+        }
+        $3 == t && (!filter || ($4 in ok)) {
             i = count
             while (i > 0 && len[i] < $1) {
                 len[i+1] = len[i]; name[i+1] = name[i]; i--
@@ -172,9 +181,16 @@ if (( VERIFY )); then
     while IFS=$'\t' read -r tier n_samples max_len meas_wall meas_rss pred_wall pred_rss rec_time rec_mem; do
         [[ "$tier" == "tier" ]] && continue
 
-        # Pick the longest sample for this tier
-        sample=$(awk -F'\t' -v t="$tier" '
-            $3 == t && $1 > best { best=$1; bn=$2 }
+        # Pick the longest sample for this tier (respecting TOOL_REGIONS)
+        sample=$(awk -F'\t' -v t="$tier" -v allowed="${TOOL_REGIONS:-}" '
+            BEGIN {
+                if (allowed != "") {
+                    m = split(allowed, arr, " ")
+                    for (i = 1; i <= m; i++) ok[arr[i]] = 1
+                    filter = 1
+                }
+            }
+            $3 == t && (!filter || ($4 in ok)) && $1 > best { best=$1; bn=$2 }
             END { if (bn != "") print best "\t" bn }
         ' "$LISTS_DIR/.lengths.tsv")
         [[ -n "$sample" ]] || continue

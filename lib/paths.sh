@@ -94,6 +94,12 @@ resolve_paths() {
         type predict_wall_s >/dev/null 2>&1 || predict_wall_s() { echo "$1"; }
         # predict_rss_mb <measured_mb> <tier> -> predicted_mb
         type predict_rss_mb >/dev/null 2>&1 || predict_rss_mb() { echo "$1"; }
+
+        # Region filter: tools that only operate on a subset of regions
+        # (e.g. RNAcofold on UTR_pair) set TOOL_REGIONS in their config.
+        # Empty (default) = no filter, tool processes every region.
+        : "${TOOL_REGIONS:=}"
+        export TOOL_REGIONS
     fi
 
     export PROJECT_ROOT RUNS_ROOT RUN_DIR DATASET TOOL
