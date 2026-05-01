@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 01_extract.py
-Extract genomic regions (mRNA, CDS, 5UTR, 3UTR, start/stop codon regions, tail)
-from a GFF + genome FASTA pair, for a list of target gene IDs.
+Extract genomic regions (mRNA, CDS, 5UTR, 3UTR, start/stop codon regions, tail,
+UTR_pair) from a GFF + genome FASTA pair, for a list of target gene IDs.
 
 Outputs (under $RUNS_ROOT/<dataset>/extracted_regions/):
-  - extracted_<region>.fa  (multifasta per region)
-  - manifest.tsv           (canonical metadata table — used by all downstream steps)
-  - extraction_summary.csv (per-gene QC log)
-  - run_manifest.yaml      (run-level reproducibility metadata)
+  - extracted_<region>.fa     (multifasta per region)
+  - manifest.tsv              (canonical metadata table — used by all downstream steps)
+  - extraction_summary.csv    (per-gene QC log)
+  - run_manifest.yaml         (run-level reproducibility metadata)
+  - utr_pair_geometry.tsv     (ONLY if UTR_pair is requested — per-record
+                               5UTR/linker/3UTR lengths)
 
 Usage:
   ./bin/01_extract.py --dataset human_liver
@@ -79,6 +81,10 @@ def is_extraction_current(out_dir, manifest_path, source_files, requested_region
     for region in requested_regions:
         if not os.path.exists(os.path.join(out_dir, f"extracted_{region}.fa")):
             return False
+    # If UTR_pair was requested, sidecar must also be present
+    if "UTR_pair" in requested_regions:
+        if not os.path.exists(os.path.join(out_dir, "utr_pair_geometry.tsv")):
+            return False
     manifest_mtime = os.path.getmtime(manifest_path)
     for src in source_files:
         if os.path.exists(src) and os.path.getmtime(src) > manifest_mtime:
@@ -89,6 +95,7 @@ def is_extraction_current(out_dir, manifest_path, source_files, requested_region
 def write_run_manifest(out_dir, dataset_name, dataset_yaml_path, config,
                        requested_genes, priority_tags):
     extr = config.get('extraction', {})
+    utr_pair = extr.get('utr_pair', {})
     manifest = {
         "dataset_name": dataset_name,
         "dataset_yaml": dataset_yaml_path,
@@ -105,6 +112,9 @@ def write_run_manifest(out_dir, dataset_name, dataset_yaml_path, config,
         "codon_flank_length": extr.get('codon_flank_length', 30),
         "tail_length": extr.get('tail_length', 100),
         "regions_to_extract": extr.get('regions_to_extract', []),
+        "utr_pair_linker_length": utr_pair.get('linker_length', 7),
+        "utr_pair_linker_char": utr_pair.get('linker_char', 'N'),
+        "utr_pair_constraint_style": utr_pair.get('constraint_style', 'cross_pair'),
     }
     path = os.path.join(out_dir, "run_manifest.yaml")
     with open(path, 'w') as f:
@@ -209,8 +219,29 @@ def write_filtered_gff(input_gff, output_gff, selected_transcripts):
     logging.info(f"Wrote {written} matching lines to temporary GFF.")
 
 
+def build_utr_pair_record(seq_5utr, seq_3utr, linker_char, linker_len):
+    """Construct a UTR_pair hybrid sequence and ViennaRNA cross-pair constraint.
+
+    Returns (hybrid_seq, constraint_str) where:
+      hybrid_seq    = 5UTR + linker + 3UTR
+      constraint_str = '<' * |5UTR| + 'x' * linker_len + '>' * |3UTR|
+
+    The '<' / '>' constraint forces base pairs to form only between the two
+    UTRs (RNAfold -C semantics); 'x' forces the linker positions unpaired.
+    """
+    linker = linker_char * linker_len
+    hybrid = f"{seq_5utr}{linker}{seq_3utr}"
+    constraint = ('<' * len(seq_5utr)
+                  + 'x' * linker_len
+                  + '>' * len(seq_3utr))
+    return hybrid, constraint
+
+
 def extract_and_slice_sequences(temp_fa, out_dir, extraction_cfg, selected_transcripts):
-    """Parse sequences from gffread, slice regions, write multifasta + manifest rows."""
+    """Parse sequences from gffread, slice regions, write multifasta + manifest rows.
+
+    Returns (logs, manifest_rows, processed_genes, utr_pair_geometry_rows).
+    """
     logging.info("Parsing sequences and slicing regions...")
 
     mode = extraction_cfg.get('output_mode', 'multifasta')
@@ -219,9 +250,19 @@ def extract_and_slice_sequences(temp_fa, out_dir, extraction_cfg, selected_trans
     flank = extraction_cfg.get('codon_flank_length', 30)
     tail_len = extraction_cfg.get('tail_length', 100)
     requested_regions = list(extraction_cfg.get('regions_to_extract', []))
+    want_utr_pair = "UTR_pair" in requested_regions
+
+    utr_pair_cfg = extraction_cfg.get('utr_pair', {}) or {}
+    utr_pair_linker_len = int(utr_pair_cfg.get('linker_length', 7))
+    utr_pair_linker_char = str(utr_pair_cfg.get('linker_char', 'N'))[:1] or 'N'
+
+    if want_utr_pair and utr_pair_linker_len < 1:
+        logging.warning("UTR_pair: linker_length < 1; forcing to 1.")
+        utr_pair_linker_len = 1
 
     os.makedirs(out_dir, exist_ok=True)
     logs, manifest_rows, processed_genes = [], [], set()
+    utr_pair_geometry_rows = []
 
     tx_lookup = {tx.stripped_id: (g_id, tx) for g_id, tx in selected_transcripts.items()}
 
@@ -248,7 +289,8 @@ def extract_and_slice_sequences(temp_fa, out_dir, extraction_cfg, selected_trans
                 "Gene_ID": g_id, "Transcript_ID": tx_info.orig_id,
                 "Selection_Reason": tx_info.reason,
                 "Total_Length": seq_len, "CDS_Length": 0,
-                "5UTR_Length": 0, "3UTR_Length": 0, "Status": "Success"
+                "5UTR_Length": 0, "3UTR_Length": 0,
+                "UTR_pair_Length": 0, "Status": "Success"
             }
 
             match = re.search(r'CDS=(\d+)-(\d+)', record.description)
@@ -273,11 +315,14 @@ def extract_and_slice_sequences(temp_fa, out_dir, extraction_cfg, selected_trans
                     logs.append(log_entry)
                     continue
 
+            seq_5utr = sequence[:start_idx]
+            seq_3utr = sequence[end_idx:]
+
             regions = {
                 "mRNA": sequence,
                 "CDS": sequence[start_idx:end_idx],
-                "5UTR": sequence[:start_idx],
-                "3UTR": sequence[end_idx:],
+                "5UTR": seq_5utr,
+                "3UTR": seq_3utr,
                 "start_codon_region": sequence[max(0, start_idx - flank):
                                                 min(seq_len, start_idx + 3 + flank)],
                 "stop_codon_region": sequence[max(0, end_idx - 3 - flank):
@@ -308,9 +353,44 @@ def extract_and_slice_sequences(temp_fa, out_dir, extraction_cfg, selected_trans
                     "short_utrs": "true" if short_utrs else "false",
                 })
 
+            # --- UTR_pair: hybrid sequence with cross-pair constraint ---
+            # Only emitted if both UTRs are non-empty. Short UTRs are still
+            # included unless filter_short_utrs dropped this record above.
+            if want_utr_pair and seq_5utr and seq_3utr:
+                hybrid_seq, constraint_str = build_utr_pair_record(
+                    seq_5utr, seq_3utr,
+                    utr_pair_linker_char, utr_pair_linker_len
+                )
+                seqname = f"{g_id}_{tx_info.orig_id}_UTR_pair"
+                # Three-line FASTA: header / sequence / constraint
+                record_text = f">{seqname}\n{hybrid_seq}\n{constraint_str}\n"
+
+                if mode == "multifasta":
+                    multifasta_files["UTR_pair"].write(record_text)
+                else:
+                    with open(os.path.join(out_dir, f"{seqname}.fa"), 'w') as f:
+                        f.write(record_text)
+
+                manifest_rows.append({
+                    "seqname": seqname,
+                    "gene_id": g_id,
+                    "transcript_id": tx_info.orig_id,
+                    "region": "UTR_pair",
+                    "length": len(hybrid_seq),
+                    "selection_reason": tx_info.reason,
+                    "short_utrs": "true" if short_utrs else "false",
+                })
+                utr_pair_geometry_rows.append({
+                    "seqname": seqname,
+                    "len_5utr": len(seq_5utr),
+                    "linker_len": utr_pair_linker_len,
+                    "len_3utr": len(seq_3utr),
+                })
+                log_entry["UTR_pair_Length"] = len(hybrid_seq)
+
             logs.append(log_entry)
 
-    return logs, manifest_rows, processed_genes
+    return logs, manifest_rows, processed_genes, utr_pair_geometry_rows
 
 
 def write_manifest_tsv(manifest_rows, out_dir):
@@ -327,6 +407,22 @@ def write_manifest_tsv(manifest_rows, out_dir):
     logging.info(f"Manifest written: {path} ({len(manifest_rows)} records)")
 
 
+def write_utr_pair_geometry(rows, out_dir):
+    """Sidecar file: per-UTR_pair-record component lengths.
+
+    Schema:  seqname  len_5utr  linker_len  len_3utr
+    """
+    if not rows:
+        return
+    path = os.path.join(out_dir, "utr_pair_geometry.tsv")
+    keys = ["seqname", "len_5utr", "linker_len", "len_3utr"]
+    with open(path, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=keys, delimiter='\t')
+        w.writeheader()
+        w.writerows(rows)
+    logging.info(f"UTR_pair geometry sidecar written: {path} ({len(rows)} records)")
+
+
 def write_summary_log(logs, requested_genes, selected, processed_genes, out_dir):
     logging.info("Compiling extraction summary...")
     log_path = os.path.join(out_dir, "extraction_summary.csv")
@@ -336,7 +432,8 @@ def write_summary_log(logs, requested_genes, selected, processed_genes, out_dir)
         logs.append({"Gene_ID": g_id, "Transcript_ID": "None",
                      "Selection_Reason": "Not_Found_in_GFF",
                      "Total_Length": 0, "CDS_Length": 0,
-                     "5UTR_Length": 0, "3UTR_Length": 0, "Status": "Missing"})
+                     "5UTR_Length": 0, "3UTR_Length": 0,
+                     "UTR_pair_Length": 0, "Status": "Missing"})
 
     missing_cds = set(selected.keys()) - processed_genes
     for g_id in missing_cds:
@@ -344,10 +441,12 @@ def write_summary_log(logs, requested_genes, selected, processed_genes, out_dir)
         logs.append({"Gene_ID": g_id, "Transcript_ID": tx_info.orig_id,
                      "Selection_Reason": tx_info.reason,
                      "Total_Length": 0, "CDS_Length": 0,
-                     "5UTR_Length": 0, "3UTR_Length": 0, "Status": "No_CDS_in_FASTA"})
+                     "5UTR_Length": 0, "3UTR_Length": 0,
+                     "UTR_pair_Length": 0, "Status": "No_CDS_in_FASTA"})
 
     keys = ["Gene_ID", "Transcript_ID", "Selection_Reason",
-            "Total_Length", "CDS_Length", "5UTR_Length", "3UTR_Length", "Status"]
+            "Total_Length", "CDS_Length", "5UTR_Length", "3UTR_Length",
+            "UTR_pair_Length", "Status"]
     with open(log_path, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
@@ -417,7 +516,8 @@ def main():
     manifest_path = os.path.join(out_dir, "manifest.tsv")
 
     if not args.force and is_extraction_current(
-            out_dir, manifest_path, [genome_fa, anno_gff, genes_file],
+            out_dir, manifest_path,
+            [genome_fa, anno_gff, genes_file, yaml_path],
             requested_regions):
         logging.info(f"Outputs in '{out_dir}' are current — skipping extraction.")
         logging.info("Use --force to re-extract.")
@@ -452,9 +552,11 @@ def main():
             logging.error(f"gffread failed:\n{e.stderr}")
             sys.exit(1)
 
-        logs, manifest_rows, processed_genes = extract_and_slice_sequences(
-            temp_fa, out_dir, extr_cfg, selected)
+        logs, manifest_rows, processed_genes, utr_pair_geom = \
+            extract_and_slice_sequences(temp_fa, out_dir, extr_cfg, selected)
         write_manifest_tsv(manifest_rows, out_dir)
+        if "UTR_pair" in requested_regions:
+            write_utr_pair_geometry(utr_pair_geom, out_dir)
         write_summary_log(logs, requested_genes, selected, processed_genes, out_dir)
 
     finally:

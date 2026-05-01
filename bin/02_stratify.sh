@@ -4,9 +4,17 @@
 # lengths already in manifest.tsv (no re-scanning).
 #
 # Outputs (under $LISTS_DIR = $RUN_DIR/lists):
-#   tier_<n>/<seqname>.fa   individual FASTA per sequence (working copy)
+#   tier_<n>/<seqname>.fa   individual FASTA per sequence (working copy);
+#                           may be 2-line (header+seq) or 3-line
+#                           (header+seq+constraint) for UTR_pair-style records
 #   tier_<n>.txt            list of paths (consumed by 04_submit.sh)
 #   .lengths.tsv            cached length info (used by 03_calibrate.sh)
+#
+# Constraint-aware: if a non-header line consists only of ViennaRNA hard-
+# constraint characters (.()<>|x), it is preserved verbatim as a third line
+# in the per-sequence FASTA and excluded from sequence-length accounting.
+# Tools that don't understand constraints can ignore this third line; tools
+# that do (e.g. RNAfold -C) consume it directly.
 #
 # Auto-invalidates: if manifest is newer than the existing tier dirs they
 # are wiped and rebuilt. Override with --no-invalidate.
@@ -36,6 +44,18 @@ done
     echo "Run 01_extract.py --dataset $DATASET first." >&2
     exit 1
 }
+
+# Sanity check: dataset YAML newer than manifest = extraction is stale.
+# 02_stratify only consumes manifest.tsv, so re-tiering on top of a stale
+# manifest would silently propagate the staleness. Skipped if the user
+# has explicitly opted out with --no-invalidate.
+if (( NO_INVALIDATE == 0 )) && [[ "$DATASET_YAML" -nt "$MANIFEST_TSV" ]]; then
+    echo "ERROR: $DATASET_YAML is newer than $MANIFEST_TSV" >&2
+    echo "Dataset config has changed since the last extraction." >&2
+    echo "Re-run: ./bin/01_extract.py --dataset $DATASET" >&2
+    echo "(or pass --no-invalidate to bypass this check)" >&2
+    exit 1
+fi
 
 read -ra bounds <<< "$TIER_BOUNDS"
 (( ${#bounds[@]} == 9 )) || {
@@ -86,6 +106,9 @@ for seqname in "${!REGION_OF[@]}"; do
 done
 
 # --- Stream each multifasta and split records into tier dirs ---
+# Records may be 2-line (header + seq) or 3-line (header + seq + constraint).
+# Constraint detection: a line of only [.()<>|x] characters (ViennaRNA hard-
+# constraint alphabet). Sequence and constraint alphabets don't overlap.
 for region in "${!SEQS_BY_REGION[@]}"; do
     mfa="$EXTRACT_DIR/extracted_${region}.fa"
     [[ -s "$mfa" ]] || {
@@ -104,14 +127,24 @@ for region in "${!SEQS_BY_REGION[@]}"; do
             tier = assign_tier(len)
             path = root "/tier_" tier "/" name ".fa"
             list = root "/tier_" tier ".txt"
-            printf ">%s\n%s\n", name, seq > path
+            if (constraint != "") {
+                printf ">%s\n%s\n%s\n", name, seq, constraint > path
+            } else {
+                printf ">%s\n%s\n", name, seq > path
+            }
             close(path)
             print path >> list
             print len "\t" name "\t" tier >> cache
         }
         /^>/ {
             flush()
-            name = substr($1, 2); seq = ""; len = 0; next
+            name = substr($1, 2); seq = ""; constraint = ""; len = 0; next
+        }
+        # Constraint line: composed only of ViennaRNA hard-constraint chars.
+        # Must be checked BEFORE the sequence-accumulator rule below.
+        /^[.()<>|x]+$/ {
+            constraint = $0
+            next
         }
         { seq = seq $0; len += length($0) }
         END { flush() }

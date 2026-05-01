@@ -30,3 +30,16 @@ extraction:
     - start_codon_region
     - stop_codon_region
     - tail_region
+    - UTR_pair                      # 5UTR + linker + 3UTR with cross-pair constraint
+
+  # Settings for the UTR_pair region. Only consulted if 'UTR_pair' appears
+  # in regions_to_extract above. Output is a 3-line FASTA:
+  #   >seqname
+  #   <5UTR><linker><3UTR>
+  #   <<<<<<...xxxxxxx...>>>>>>>
+  # Tools that understand ViennaRNA-style constraints (e.g. RNAfold -C) can
+  # consume this directly; others ignore the constraint line.
+  utr_pair:
+    linker_length: 7
+    linker_char: N
+    constraint_style: cross_pair    # forward-compat: only style supported now

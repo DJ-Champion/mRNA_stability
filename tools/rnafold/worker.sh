@@ -2,6 +2,24 @@
 # tools/rnafold/worker.sh
 # Process a single FASTA: compute MFE, optionally generate shuffled MFEs and stats.
 #
+# Two input shapes are supported:
+#
+#   (a) Standard 2-line FASTA (header + sequence)
+#       Streaming pipe esl-shuffle | RNAfold for shuffles. Fast.
+#
+#   (b) Constrained 3-line FASTA (header + sequence + ViennaRNA hard-
+#       constraint string). Detected automatically from a third line composed
+#       only of [.()<>|x] characters.
+#
+#       Constraints currently produced by 01_extract.py for the UTR_pair
+#       region encode cross-pair semantics:
+#           <<<<<...xxxxxxx...>>>>>
+#       i.e. 5UTR positions only pair with 3UTR positions, linker forced
+#       unpaired. For shuffles, 5UTR and 3UTR halves are shuffled
+#       INDEPENDENTLY then rejoined with the original linker — pooling them
+#       would destroy the assay. The constraint string is reused as-is for
+#       every shuffle (linker geometry is fixed by the extraction config).
+#
 # Required env (set by lib/paths.sh -> resolve_paths):
 #   RESULTS_DIR, ERRORS_DIR, TMP_DIR, TOOL_DIR
 #   RNAFOLD_BIN, ESL_SHUFFLE_BIN, MIN_VALID_PERCENT
@@ -44,11 +62,38 @@ if [[ -s "$output_file" ]] && (( $(awk 'END{print NR}' "$output_file") > 1 )); t
     exit 0
 fi
 
+# --- Detect constrained vs unconstrained input ---
+# Constraint line = third record line (typically) consisting only of
+# ViennaRNA hard-constraint characters.
+read_record() {
+    # Echo on stdout: hdr<TAB>seq<TAB>constraint   (constraint may be empty)
+    awk '
+        /^>/ { hdr = substr($0, 2); next }
+        /^[.()<>|x]+$/ && seq != "" { cons = $0; next }
+        { seq = seq $0 }
+        END {
+            gsub(/[ \t\r]/, "", seq)
+            gsub(/[ \t\r]/, "", cons)
+            printf "%s\t%s\t%s\n", hdr, seq, cons
+        }
+    ' "$1"
+}
+
+IFS=$'\t' read -r hdr full_seq constraint_str < <(read_record "$fasta_file")
+is_constrained=0
+rnafold_orig_flags=(--noPS)
+if [[ -n "$constraint_str" ]]; then
+    is_constrained=1
+    rnafold_orig_flags=(--noPS -C)
+fi
+
 # --- 1. Original MFE ---
 extract_mfe() {
     awk 'match($0, /\(\s*([-+]?[0-9]*\.?[0-9]+)\s*\)$/, a) { print a[1]; exit }'
 }
-orig_mfe=$("$RNAFOLD_BIN" --noPS < "$fasta_file" 2>>"$error_file" | extract_mfe)
+
+orig_mfe=$("$RNAFOLD_BIN" "${rnafold_orig_flags[@]}" < "$fasta_file" \
+            2>>"$error_file" | extract_mfe)
 
 if [[ ! "$orig_mfe" =~ ^[-+]?[0-9]*\.?[0-9]+$ ]]; then
     echo "ERROR: invalid orig MFE for $seq_name" >> "$error_file"
@@ -74,14 +119,75 @@ raw_tmp="$TMP_DIR/raw_${seq_name}.$$"
 
 echo "transcript_id,iteration,shuffled_mfe" > "$raw_tmp"
 
-"$ESL_SHUFFLE_BIN" -d -N "$N_SHUFFLES" "$fasta_file" 2>>"$error_file" \
-  | "$RNAFOLD_BIN" --noPS 2>>"$error_file" \
-  | awk -v raw="$raw_tmp" -v s="$seq_name" '
-      match($0, /\(\s*([-+]?[0-9]*\.?[0-9]+)\s*\)$/, a) {
-          print a[1]
-          print s "," ++iter "," a[1] >> raw
-      }' \
-  | sort -n > "$stats_file"
+if (( is_constrained == 0 )); then
+    # --- 3a. Unconstrained: streaming pipe (fast path, unchanged) ---
+    "$ESL_SHUFFLE_BIN" -d -N "$N_SHUFFLES" "$fasta_file" 2>>"$error_file" \
+      | "$RNAFOLD_BIN" --noPS 2>>"$error_file" \
+      | awk -v raw="$raw_tmp" -v s="$seq_name" '
+          match($0, /\(\s*([-+]?[0-9]*\.?[0-9]+)\s*\)$/, a) {
+              print a[1]
+              print s "," ++iter "," a[1] >> raw
+          }' \
+      | sort -n > "$stats_file"
+else
+    # --- 3b. Constrained: shuffle UTR halves independently, rejoin, fold ---
+    # Parse 5UTR / linker / 3UTR boundaries from the constraint string.
+    # Format guaranteed by 01_extract.py: '<' * n5 + 'x' * nlink + '>' * n3
+    n5=$(awk -v c="$constraint_str" 'BEGIN{
+        n=0; while (substr(c, n+1, 1) == "<") n++; print n
+    }')
+    nlink=$(awk -v c="$constraint_str" -v n5="$n5" 'BEGIN{
+        n=0; while (substr(c, n5 + n + 1, 1) == "x") n++; print n
+    }')
+    n3=$(awk -v c="$constraint_str" -v skip="$((n5))" -v lk="$nlink" 'BEGIN{
+        n=0; while (substr(c, skip + lk + n + 1, 1) == ">") n++; print n
+    }')
+
+    if (( n5 < 1 || n3 < 1 || (n5 + nlink + n3) != ${#constraint_str} )); then
+        echo "ERROR: malformed UTR_pair constraint for $seq_name" >> "$error_file"
+        echo "  constraint=$constraint_str" >> "$error_file"
+        echo "  parsed n5=$n5 nlink=$nlink n3=$n3 (expected total ${#constraint_str})" >> "$error_file"
+        rm -f "$raw_tmp"
+        exit 1
+    fi
+
+    seq_5utr="${full_seq:0:n5}"
+    linker="${full_seq:n5:nlink}"
+    seq_3utr="${full_seq:n5+nlink:n3}"
+
+    # FIFO-style temp fastas for esl-shuffle (it needs a file or '-')
+    fa_5="$TMP_DIR/${seq_name}_5utr.$$.fa"
+    fa_3="$TMP_DIR/${seq_name}_3utr.$$.fa"
+    printf ">5utr\n%s\n" "$seq_5utr" > "$fa_5"
+    printf ">3utr\n%s\n" "$seq_3utr" > "$fa_3"
+
+    iter=0
+    : > "$stats_file"
+    for ((i = 1; i <= N_SHUFFLES; i++)); do
+        s5=$("$ESL_SHUFFLE_BIN" -d "$fa_5" 2>>"$error_file" \
+                | grep -v '^>' | tr -d '\n\r ')
+        s3=$("$ESL_SHUFFLE_BIN" -d "$fa_3" 2>>"$error_file" \
+                | grep -v '^>' | tr -d '\n\r ')
+
+        # Skip iterations where shuffle returned nothing usable
+        [[ -n "$s5" && -n "$s3" ]] || continue
+        (( ${#s5} == n5 && ${#s3} == n3 )) || continue
+
+        hybrid="${s5}${linker}${s3}"
+        energy=$(printf ">shuf_%d\n%s\n%s\n" "$i" "$hybrid" "$constraint_str" \
+                    | "$RNAFOLD_BIN" --noPS -C 2>>"$error_file" \
+                    | extract_mfe)
+
+        if [[ "$energy" =~ ^[-+]?[0-9]*\.?[0-9]+$ ]]; then
+            echo "$energy" >> "$stats_file"
+            iter=$((iter + 1))
+            echo "$seq_name,$iter,$energy" >> "$raw_tmp"
+        fi
+    done
+
+    rm -f "$fa_5" "$fa_3"
+    sort -n -o "$stats_file" "$stats_file"
+fi
 
 n_valid=$(awk 'END{print NR}' "$stats_file")
 if (( n_valid < min_valid )); then
@@ -116,4 +222,4 @@ END {
 
 rm -f "$stats_file"
 [[ -s "$error_file" ]] || rm -f "$error_file"
-echo "Done $seq_name ($n_valid/$N_SHUFFLES shuffles)"
+echo "Done $seq_name ($n_valid/$N_SHUFFLES shuffles${is_constrained:+, constrained})"
