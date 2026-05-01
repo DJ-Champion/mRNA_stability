@@ -24,6 +24,9 @@ check_one_list() {
     while IFS= read -r fasta; do
         local seq_name out
         seq_name=$(basename "$fasta" .fa)
+        if [[ -n "$TOOL_REGIONS" && "$seq_name" != *"$TOOL_REGIONS"* ]]; then
+            continue
+        fi
         out="$RESULTS_DIR/results_${seq_name}.csv"
         if [[ ! -s "$out" ]] || (( $(awk 'END{print NR}' "$out") < 2 )); then
             echo "$fasta"
