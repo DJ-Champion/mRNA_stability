@@ -31,7 +31,7 @@ PATH="$(dirname "$RNAFOLD_BIN"):$(dirname "$ESL_SHUFFLE_BIN"):$PATH"
 
 # --- Per-tier shuffle policy (10 values for 10 tiers) ---
 # 0 = MFE-only fast path (no shuffles).
-: "${TIER_SHUFFLES:=1000 1000 1000 1000 1000 1000 1000 100 10 0}"
+: "${TIER_SHUFFLES:=1000 1000 1000 1000 1000 1000 1000 100 10 10}"
 
 # --- Worker parameters ---
 : "${MIN_VALID_PERCENT:=90}"      # fraction of shuffles that must succeed

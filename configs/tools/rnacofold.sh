@@ -30,7 +30,7 @@ PATH="$(dirname "$RNACOFOLD_BIN"):$(dirname "$ESL_SHUFFLE_BIN"):$PATH"
 # Cofold is computationally cheaper than constrained-fold (no constraint
 # overhead, simpler thermodynamic model), so we can match the larger N
 # used for unconstrained RNAfold. Adjust here if a different null is wanted.
-: "${TIER_SHUFFLES:=1000 1000 1000 1000 1000 1000 1000 100 10 0}"
+: "${TIER_SHUFFLES:=1000 1000 1000 1000 1000 1000 1000 100 10 10}"
 
 # --- Worker parameters ---
 : "${MIN_VALID_PERCENT:=90}"
