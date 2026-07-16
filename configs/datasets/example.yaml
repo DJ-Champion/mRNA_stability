@@ -59,6 +59,17 @@ extraction:
     linker_char: N
     constraint_style: cross_pair    # forward-compat: only style supported now
 
+
+# Tool-specific settings. These are optional; configs/tools/<tool>.sh provides
+# defaults when a block is absent. RNAlfold first pass runs only standard
+# two-line FASTA regions, not UTR_pair constraint records.
+tools:
+  rnalfold:
+    regions: [mRNA, CDS, 5UTR, 3UTR]
+    window_length: 63
+    n_shuffles: 1000
+    min_valid_percent: 90
+
 # Metrics — lightweight per-transcript features computed by bin/01b_metrics.py.
 # Each key is a plugin module name (metrics/<name>.py). Set 'enabled: true'
 # to include in a run; metrics with no entry here, or 'enabled: false', are
