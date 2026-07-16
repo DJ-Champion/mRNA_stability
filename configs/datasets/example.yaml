@@ -22,7 +22,7 @@ inputs:
 # Junctions does not need any references.
 references:
   # csc_table: data/references/human/csc_presnyak2015.tsv     # for codon_indices
-  # cai_weights: data/references/human/cai_weights.tsv         # for codon_indices
+  # cai_weights: data/references/human/cai_weights.tsv         # pre-built; auto-built by cai plugin if absent
   # trna_copies: data/references/human/trna_gene_copies.tsv    # for codon_indices
 
 extraction:
@@ -78,3 +78,10 @@ metrics:
   junctions:
     enabled: true
     # No options — junctions reads canonical.gff and manifest.tsv only.
+
+  # cai:
+  #   enabled: true
+  #   cocoputs_tsv: data/references/human/Human_CDS.tsv  # CoCoPUTs source; needed only
+  #                                                       # when cai_weights.tsv is absent
+  #   # weights_path: data/references/human/cai_weights.tsv  # explicit override (optional)
+  #   # min_codons: 100

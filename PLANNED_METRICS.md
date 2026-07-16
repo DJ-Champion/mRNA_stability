@@ -20,9 +20,11 @@ established by `sequence_basic`, `codon_aa_counts`, and `uorf`.
 
 ## Explicitly excluded (with rationale)
 
-- **CAI / CSC** — Codon-usage indices. CSC is fitted from half-life data,
-  so using it as a feature in a half-life predictor would be
-  methodologically circular. CAI may be revisited; not in current scope.
+- **CSC** — Fitted directly from mRNA half-life data, so using it as a
+  feature in a half-life predictor would be methodologically circular.
+- **CAI** — Implemented as `metrics/cai.py`. Reference weights are built
+  from CoCoPUTs ribosomal protein genes (RPL*/RPS*) via
+  `bin/build_cai_weights.py`.
 - **miRNA seed sites** — Real biological signal but the reference-data
   burden (which miRNAs, which seed conservation cutoff) is high. Deferred
   until a specific hypothesis needs them.

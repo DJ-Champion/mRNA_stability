@@ -9,9 +9,6 @@ Centralises:
     features' — handles mRNA / transcript / primary_transcript / lnc_RNA /
     ncRNA / etc. without enumeration.
   * Manifest reader.
-
-Originally lived inside metrics/junctions.py; lifted here once
-metrics/architecture.py needed the same helpers.
 """
 from __future__ import annotations
 

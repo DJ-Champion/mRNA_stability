@@ -1,1 +1,11 @@
+__pycache__/
+*.pyc
 .Rhistory
+RNAstab/data
+RNAstab/figures
+RNAstab/RNAstab.Rproj
+RNAstab/data/raw/salukiData
+RNAstab/.Rproj.user
+RNAstab/models
+.Rproj.user
+RNAstab/.RData
