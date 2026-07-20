@@ -83,7 +83,7 @@ calib_params() {
 predict_wall_s() {
     local measured_s="$1"
     awk -v m="$measured_s" -v n="$RNALFOLD_N_SHUFFLES" \
-        'BEGIN { printf "%d\n", int(m * (n + 1) + 0.5) }'
+        'BEGIN { printf "%d\n", int((m +1) * (n + 1)) }'
 }
 
 # Peak memory should be governed mainly by sequence/window size, not shuffle count.
