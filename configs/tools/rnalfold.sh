@@ -48,8 +48,8 @@ else:
 PY
 }
 
-: "${RNALFOLD_BIN:=RNALfold}"
-: "${ESL_SHUFFLE_BIN:=esl-shuffle}"
+: "${RNALFOLD_BIN:=/home/chado47p/Software/ViennaRNA/bin/RNALfold}"
+: "${ESL_SHUFFLE_BIN:=/home/chado47p/Software/hmmer3.4/bin/esl-shuffle}"
 
 : "${RNALFOLD_WINDOW_LENGTH:=$(_rnalfold_yaml window_length 63)}"
 : "${RNALFOLD_N_SHUFFLES:=$(_rnalfold_yaml n_shuffles 1000)}"
