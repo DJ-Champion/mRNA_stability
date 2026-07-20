@@ -60,12 +60,15 @@ if awk 'BEGIN{seen_seq=0} /^>/ {next} /^[.()<>|x]+$/ && seen_seq {found=1} NF {s
 fi
 
 # Extract the minimum local MFE from RNAlfold output.
-# RNAlfold emits one or more local structures with energies in parentheses;
-# we keep the most negative numeric value.
+# RNAlfold emits one local structure line per hit, each starting with dot-bracket
+# notation, then echoes the sequence and a trailing summary line holding the summed
+# energy of the whole non-overlapping decomposition. That summary is always at least
+# as negative as any individual hit, so the match must be anchored to structure lines
+# or it wins every comparison. We keep the most negative structure-line value.
 extract_min_local_mfe() {
     awk '
         BEGIN { found = 0; lowest = 0 }
-        match($0, /\([[:space:]]*[-+]?[0-9]*\.?[0-9]+[[:space:]]*\)/) {
+        /^[.()]+[[:space:]]+\(/ && match($0, /\([[:space:]]*[-+]?[0-9]*\.?[0-9]+[[:space:]]*\)/) {
             token = substr($0, RSTART, RLENGTH)
             gsub(/[()[:space:]]/, "", token)
             val = token + 0
@@ -129,7 +132,9 @@ printf "seq_name,iteration,shuffle_min_local_mfe\n" > "$raw_tmp"
             seen_record = 1
             next
         }
-        match($0, /\([[:space:]]*[-+]?[0-9]*\.?[0-9]+[[:space:]]*\)/) {
+        # Anchored to structure lines; see extract_min_local_mfe for why the
+        # trailing summary line must be excluded.
+        /^[.()]+[[:space:]]+\(/ && match($0, /\([[:space:]]*[-+]?[0-9]*\.?[0-9]+[[:space:]]*\)/) {
             token = substr($0, RSTART, RLENGTH)
             gsub(/[()[:space:]]/, "", token)
             val = token + 0
