@@ -97,7 +97,8 @@ def collate_raw_shuffles(raw_dir: str, manifest: dict[str, dict[str, str]], out_
     with open(out_path, 'w', newline='') as fout:
         writer = csv.DictWriter(
             fout,
-            fieldnames=['seqname'] + RAW_MANIFEST_COLS + ['iteration', 'shuffle_min_local_mfe'],
+            fieldnames=['seqname'] + RAW_MANIFEST_COLS + ['iteration', 'shuffle_min_local_mfe',
+                                                          'shuffle_hotspot_coverage'],
             delimiter='\t',
             lineterminator='\n',
         )
@@ -106,6 +107,8 @@ def collate_raw_shuffles(raw_dir: str, manifest: dict[str, dict[str, str]], out_
         for fpath in files:
             with open(fpath, newline='') as fin:
                 reader = csv.DictReader(fin)
+                # shuffle_hotspot_coverage is not required, so raw files written
+                # by an older worker still collate (the column becomes NA).
                 required = {'seq_name', 'iteration', 'shuffle_min_local_mfe'}
                 if not reader.fieldnames or not required.issubset(reader.fieldnames):
                     logging.warning("Skipping malformed raw shuffle file: %s", fpath)
@@ -118,6 +121,7 @@ def collate_raw_shuffles(raw_dir: str, manifest: dict[str, dict[str, str]], out_
                         out_row[col] = meta.get(col, '')
                     out_row['iteration'] = row.get('iteration', '')
                     out_row['shuffle_min_local_mfe'] = row.get('shuffle_min_local_mfe', '')
+                    out_row['shuffle_hotspot_coverage'] = row.get('shuffle_hotspot_coverage', 'NA')
                     writer.writerow(out_row)
                     written += 1
 
