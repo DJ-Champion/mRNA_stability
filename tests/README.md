@@ -15,12 +15,20 @@ Or, for a quick non-pytest sanity check with diff output:
     python tests/run_synthetic_check.py
     python tests/run_synthetic_check.py --keep-outputs /tmp/nmd_check -v
 
+The family-clustering end-to-end check is also pytest-free, and skips
+cleanly if `seqkit` or `mmseqs` is not on PATH:
+
+    python tests/run_family_check.py
+    python tests/run_family_check.py --keep-outputs /tmp/family_check -v
+
 ## Layout
 
     tests/
       conftest.py                          # puts repo root on sys.path
       run_synthetic_check.py               # CLI runner (no pytest required)
+      run_family_check.py                  # family clustering, end-to-end
       test_nmd_fragility_synthetic.py      # the three-model sanity check
+      test_lib_family.py                   # lib/family.py units
       fixtures/
         _generate_and_verify.py            # generates the CDS FASTA + self-checks
         synthetic_5x200.gff3               # 5-exon × 200-nt transcript, + strand
