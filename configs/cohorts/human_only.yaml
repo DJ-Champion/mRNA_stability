@@ -28,9 +28,19 @@ levels:
   medium: { min_nbs: 0.40, min_cov: 0.65, max_evalue: 1.0e-5,  min_fident: 0.30 }
   loose:  { min_nbs: 0.25, min_cov: 0.50, max_evalue: 1.0e-3,  min_fident: 0.20 }
 
-# 0.02 suits ~19k genes at k=5. Tighten toward 0.01 for k=10.
+# The ceiling is derived from k, because the real constraint is that a family
+# must pack into a fold: a family may take at most max_fold_fraction of one
+# fold, and a fold is 1/k of the corpus. At k=5 that gives 0.25/5 = 5%.
+#
+# Treat it as a heuristic, not a boundary. Measured on human MANE (13,600
+# genes): strict fragments the C2H2 zinc fingers into pieces of <= 23, which
+# is under-merging; loose assembles them into one coherent 364-member family
+# (2.7%, ~13% of a fold at k=5) and merges the Ras superfamily at superfamily
+# rather than family level. `loose` is the right blocking level here.
 selection:
-  max_family_pct: 0.02
+  k_folds: 5
+  max_fold_fraction: 0.25
+  # max_family_pct: 0.05     # explicit override, bypasses the k derivation
 
 translate:
   min_protein_len: 30

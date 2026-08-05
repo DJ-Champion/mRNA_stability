@@ -50,13 +50,22 @@ levels:
   loose:  { min_nbs: 0.25, min_cov: 0.50, max_evalue: 1.0e-3,  min_fident: 0.20 }
 
 # Selection rule applied to family_qc.tsv and reported at the end of a run:
-# recommend the loosest level whose largest family stays under this fraction
-# of the corpus. Over-merging is the safe direction, but a block larger than
-# 1/k of the corpus cannot be packed into balanced folds.
+# recommend the loosest level whose largest family stays under the ceiling.
+# Over-merging is the safe direction, but a block larger than a fold cannot be
+# packed into balanced folds.
 #
-# 0.02 suits ~19k genes at k=5. Tighten toward 0.01 for k=10.
+# The ceiling is derived from k rather than fixed, because the constraint is
+# really about packing: a family may take at most `max_fold_fraction` of one
+# fold, and a fold is 1/k of the corpus. At k=5 that is 0.25/5 = 5%.
+#
+# It is a heuristic, not a hard boundary. A level that misses it narrowly
+# while its largest family still sits well inside one fold is usually the
+# better choice, since under-merging is the unsafe error. The run warns when
+# a level lands just over.
 selection:
-  max_family_pct: 0.02
+  k_folds: 5                 # the k you will use downstream
+  max_fold_fraction: 0.25    # largest family as a share of one fold
+  # max_family_pct: 0.05     # explicit override, bypasses the k derivation
 
 # Translation controls.
 translate:

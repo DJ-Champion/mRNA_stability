@@ -15,6 +15,8 @@ Designed family structure:
     S1, S2, S3   independent                     -> three singletons
     X1           A1 with a planted internal stop -> must join family A
     L1, L2       Cys/Gly/Ser-rich near-identical -> one family
+    T1           20 aa, below min_protein_len    -> unsearched singleton,
+                                                    still present in family.tsv
 
 Two load-bearing cases, both guarding silent under-merging:
 
@@ -28,6 +30,10 @@ from the main search entirely: no self-hit, and no edge to each other. Without
 the `--mask 0` rescue pass they end up as two singletons despite being near
 identical. Modelled on a real human MANE case (a ~33%-Cys KRTAP whose
 paralogues hit at e-values ~1e-71 while it had no self-hit).
+
+T1 — too short to search, but it must still appear in family.tsv. Dropping it
+would put an unexplained NA in the blocking table on a left_join from
+manifest.tsv, breaking the gene-universe guarantee the design rests on.
 """
 from __future__ import annotations
 
@@ -101,6 +107,7 @@ def build_fixture(runs_root: Path) -> None:
         'S1': seq(cds(N_CODONS)), 'S2': seq(cds(N_CODONS)), 'S3': seq(cds(N_CODONS)),
         'X1': seq(x1),
         'L1': back_translate(lc1), 'L2': back_translate(lc2),
+        'T1': seq(cds(20)),                  # 21 aa, under min_protein_len 30
     }
 
     out = runs_root / 'human_test' / 'extracted_regions'
@@ -126,9 +133,21 @@ def check(rows: list[dict], failures: list[str]) -> None:
         if not cond:
             failures.append(label)
 
-    expect("all 11 genes present", len(rows) == 11)
+    expect("all 12 genes present", len(rows) == 12)
     expect("no missing family assignment",
            all(r.get('family_id_medium') for r in rows))
+
+    # Gene-universe guarantee: a protein too short to search is still a row.
+    expect("too-short protein kept in the universe", 'GENET1' in by_gene)
+    if 'GENET1' in by_gene:
+        expect("too-short protein flagged unsearched",
+               by_gene['GENET1']['searched'] == 'false')
+        expect("too-short protein is a singleton",
+               by_gene['GENET1']['family_size_medium'] == '1')
+        expect("too-short protein has a real family id",
+               bool(by_gene['GENET1']['family_id_medium']))
+    expect("every other protein is marked searched",
+           sum(1 for r in rows if r['searched'] == 'true') == 11)
 
     fam = {g: by_gene[g]['family_id_medium'] for g in by_gene}
     a_members = {'GENEA1', 'GENEA2', 'GENEA3', 'GENEX1'}

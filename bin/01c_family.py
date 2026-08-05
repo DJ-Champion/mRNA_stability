@@ -149,8 +149,19 @@ class Cohort:
         self.max_internal_stop_frac = float(
             t.get('max_internal_stop_frac', _DEFAULT_MAX_INTERNAL_STOP_FRAC))
 
+        # The real constraint on a family is that it must pack into a fold.
+        # Deriving the ceiling from k keeps that explicit: a family may occupy
+        # at most `max_fold_fraction` of one fold, and a fold is 1/k of the
+        # corpus. A fixed percentage silently becomes wrong when k changes.
         sel = config.get('selection') or {}
-        self.max_family_pct = float(sel.get('max_family_pct', _DEFAULT_MAX_FAMILY_PCT))
+        self.k_folds = int(sel.get('k_folds', 5))
+        if self.k_folds < 2:
+            _die(f"selection.k_folds must be >= 2 (got {self.k_folds}).")
+        self.max_fold_fraction = float(sel.get('max_fold_fraction', 0.25))
+        explicit = sel.get('max_family_pct')
+        self.ceiling_is_explicit = explicit is not None
+        self.max_family_pct = (float(explicit) if self.ceiling_is_explicit
+                               else self.max_fold_fraction / self.k_folds)
 
         b = config.get('binaries') or {}
         self.seqkit_bin = b.get('seqkit') or os.environ.get('SEQKIT_BIN') or 'seqkit'
@@ -264,9 +275,13 @@ def stage_translate(cohort: Cohort, out_dir: Path, force: bool) -> None:
                 n_no_term += 1
             if 'X' in res.aa:
                 n_with_x += 1
-            if len(res.aa) < cohort.min_protein_len:
+            # Too short to align meaningfully, but NOT dropped: it stays in
+            # the gene universe as a flagged singleton so a left_join from
+            # manifest.tsv remains lossless. Silently omitting it would put an
+            # unexplained NA in the blocking table.
+            too_short = len(res.aa) < cohort.min_protein_len
+            if too_short:
                 n_short += 1
-                continue
 
             protein_id = make_protein_id(
                 species, normalise_id(gene_raw), transcript_id)
@@ -284,6 +299,7 @@ def stage_translate(cohort: Cohort, out_dir: Path, force: bool) -> None:
                 'dataset': dataset,
                 'protein_len': len(res.aa),
                 'had_internal_stop': 'true' if res.had_internal_stop else 'false',
+                'searched': 'false' if too_short else 'true',
                 'aa': res.aa,
             })
 
@@ -292,7 +308,7 @@ def stage_translate(cohort: Cohort, out_dir: Path, force: bool) -> None:
                  f"'<gene>_<transcript>_CDS' pattern. Silently skipping them "
                  f"would under-merge families; fix 01_extract.py output first.")
 
-        n_translated = n_cds - n_short
+        n_translated = n_cds - n_bad_header
         frac_internal = (n_internal / n_cds) if n_cds else 0.0
         if frac_internal > cohort.max_internal_stop_frac:
             _die(f"{dataset}: {n_internal}/{n_cds} ({frac_internal:.1%}) CDS have "
@@ -303,36 +319,47 @@ def stage_translate(cohort: Cohort, out_dir: Path, force: bool) -> None:
         qc_rows.append({
             'dataset': dataset, 'species': species,
             'n_cds': n_cds, 'n_translated': n_translated,
+            'n_searched': n_translated - n_short,
             'n_internal_stop': n_internal, 'n_no_terminal_stop': n_no_term,
             'n_too_short': n_short, 'n_with_X': n_with_x,
         })
         log.info(f"  {n_translated} proteins ({n_internal} internal stop, "
-                 f"{n_short} below {cohort.min_protein_len} aa)")
+                 f"{n_short} below {cohort.min_protein_len} aa kept as "
+                 f"unsearched singletons)")
 
     if not records:
         _die("No proteins survived translation.")
 
+    # Only searchable proteins go to mmseqs; the rest stay in the universe.
+    n_searched = 0
     with open(faa, 'w') as fh:
         for r in records:
+            if r['searched'] != 'true':
+                continue
+            n_searched += 1
             fh.write(f">{r['protein_id']}\n")
             seq = r['aa']
             for i in range(0, len(seq), 60):
                 fh.write(seq[i:i + 60] + '\n')
 
-    # proteins.ids is the gene universe. The cluster stage and the R recipe in
-    # FAMILY_CLUSTERING.md both need it: singletons never appear in hits.tsv,
-    # so the universe is not recoverable from the alignment table.
+    # proteins.ids is the gene universe — every protein, searched or not. The
+    # cluster stage and the R recipe in FAMILY_CLUSTERING.md both need it:
+    # singletons never appear in hits.tsv, so the universe is not recoverable
+    # from the alignment table.
     with open(pids, 'w') as fh:
         for r in records:
             fh.write(r['protein_id'] + '\n')
 
     cols = ['protein_id', 'species', 'gene_id', 'transcript_id', 'dataset',
-            'protein_len', 'had_internal_stop']
+            'protein_len', 'had_internal_stop', 'searched']
     _write_tsv(ptsv, cols, [{k: r[k] for k in cols} for r in records])
     _write_tsv(qc, list(qc_rows[0].keys()), qc_rows)
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    log.info(f"Pooled {len(records)} proteins → {faa}")
+    n_unsearched = len(records) - n_searched
+    log.info(f"Pooled {len(records)} proteins ({n_searched} searchable"
+             + (f", {n_unsearched} kept as unsearched singletons"
+                if n_unsearched else "") + f") → {faa}")
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +515,11 @@ def stage_cluster(cohort: Cohort, out_dir: Path, force: bool) -> None:
     self_bits: dict[str, float] = {}
     harvest_self_bits(hits, self_bits)
 
-    absent = [pid for pid in ids if pid not in self_bits]
+    # Unsearched proteins are absent from proteins.faa by construction, so
+    # they have no self-hit and never appear in any alignment row. They are
+    # singletons by definition; only searched proteins need a denominator.
+    searched = [p['protein_id'] for p in proteins if p.get('searched') == 'true']
+    absent = [pid for pid in searched if pid not in self_bits]
     if absent:
         # tantan masked these out of the target database. They lose both their
         # denominator and, if their homologues were masked too, their edges.
@@ -588,7 +619,7 @@ def stage_cluster(cohort: Cohort, out_dir: Path, force: bool) -> None:
     cols = ['species', 'gene_id', 'transcript_id', 'dataset']
     for name in level_names:
         cols += [f'family_id_{name}', f'family_size_{name}']
-    cols += ['protein_len', 'had_internal_stop']
+    cols += ['protein_len', 'had_internal_stop', 'searched']
 
     size_of: dict[str, Counter] = {
         name: Counter(family_of[name]) for name in level_names}
@@ -602,6 +633,7 @@ def stage_cluster(cohort: Cohort, out_dir: Path, force: bool) -> None:
             'dataset': p['dataset'],
             'protein_len': p['protein_len'],
             'had_internal_stop': p['had_internal_stop'],
+            'searched': p.get('searched', 'true'),
         }
         for name in level_names:
             fam = family_of[name][i]
@@ -636,10 +668,31 @@ def _report_selection(cohort: Cohort, qc_rows: list[dict]) -> None:
                  f"species_in_largest={r['n_species_in_largest']}")
 
     ceiling = 100.0 * cohort.max_family_pct
+    if cohort.ceiling_is_explicit:
+        basis = "explicit selection.max_family_pct"
+    else:
+        basis = (f"{cohort.max_fold_fraction:g} of a fold at k={cohort.k_folds}")
+
     ok = [r for r in qc_rows if float(r['max_family_pct']) < ceiling]
     if ok:
         log.info(f"Recommended blocking level: '{ok[0]['level']}' "
-                 f"(loosest with max_family_pct < {ceiling:g}%).")
+                 f"(loosest with max_family_pct < {ceiling:g}%, {basis}).")
+        runners_up = [r for r in qc_rows if r is not ok[0]
+                      and float(r['max_family_pct']) >= ceiling]
+        near = [r for r in runners_up
+                if float(r['max_family_pct']) < ceiling * 1.5]
+        if near:
+            # A level that misses by a hair should not be dismissed silently:
+            # the ceiling is a packing heuristic, not a hard boundary, and
+            # over-merging is the safe direction.
+            names = ', '.join(f"{r['level']} ({r['max_family_pct']}%)"
+                              for r in near)
+            log.warning(
+                f"Level(s) just over the ceiling: {names}. The ceiling is a "
+                f"packing heuristic, not a hard limit — a looser level whose "
+                f"largest family is still well inside one fold "
+                f"({100.0 / cohort.k_folds:.1f}% of the corpus) is usually the "
+                f"better choice. Check family_members.tsv before deciding.")
     else:
         log.warning(
             f"No level keeps its largest family under {ceiling:g}% of the "

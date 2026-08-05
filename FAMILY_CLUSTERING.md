@@ -82,7 +82,9 @@ levels:
   loose:  { min_nbs: 0.25, min_cov: 0.50, max_evalue: 1.0e-3,  min_fident: 0.20 }
 
 selection:
-  max_family_pct: 0.02     # selection rule ceiling; see 1.7
+  k_folds: 5               # ceiling is derived from k; see 1.7
+  max_fold_fraction: 0.25  # largest family as a share of one fold
+  # max_family_pct: 0.05   # explicit override, bypasses the derivation
 
 translate:
   min_protein_len: 30
@@ -154,12 +156,19 @@ Then, per record:
 2. Replace every remaining internal `*` with `X`. Count these — mmseqs treats
    `X` as unmatchable, so internal stops weaken alignments rather than
    corrupting them.
-3. Drop records shorter than 30 aa after step 1; record the count.
-4. Emit per-dataset counters to `translate_qc.tsv`:
-   `dataset, n_cds, n_translated, n_internal_stop, n_no_terminal_stop, n_too_short, n_with_X`.
+3. Mark records shorter than 30 aa after step 1 as **unsearched**. Do not drop
+   them. They are excluded from `proteins.faa` (too short to align
+   meaningfully) but stay in the gene universe as flagged singletons, so a
+   `left_join` from `manifest.tsv` remains lossless. Dropping them puts an
+   unexplained NA in the blocking table — the same class of silent hole as the
+   masking bug in 1.5.
+4. Emit per-dataset counters to `translate_qc.tsv`: `dataset, species, n_cds,
+   n_translated, n_searched, n_internal_stop, n_no_terminal_stop,
+   n_too_short, n_with_X`.
 
 `n_internal_stop` above a percent or so means the wrong `transl_table`, a frame
 problem upstream, or a genuinely poor annotation. Fail loudly above 5%.
+(Human MANE measures 19/13,600 = 0.14%.)
 
 seqkit is doing real work here — it handles ambiguous codons properly
 (`ACN`→`T`, `MGR`→`R`, etc.) rather than emitting `X`. Keep it; just don't let
@@ -368,9 +377,12 @@ next to the search.
 | `family_id_loose` / `family_size_loose` | as above |
 | `protein_len` | aa, post-processing |
 | `had_internal_stop` | `true` / `false` |
+| `searched` | `false` for proteins excluded from the search (below `min_protein_len`); they are forced singletons |
 
 Every gene gets a family at every level, singletons included, so a `left_join`
 from `manifest.tsv` is lossless. `NA` never appears in a `family_id` column.
+That holds for unsearchable proteins too — they carry `searched = false` and a
+real singleton family ID rather than being omitted.
 
 **`family_qc.tsv`** — one row per level, and the basis for choosing one:
 
@@ -387,11 +399,41 @@ from `manifest.tsv` is lossless. `NA` never appears in a `family_id` column.
 | **`max_family_pct`** | `max_family_size / n_genes` — the decision variable |
 | `n_species_in_largest` | |
 
-**Selection rule: take the loosest level whose `max_family_pct` stays under
-2%.** Loosest, because over-merging is the safe direction. Under 2%, because
-beyond that the largest block starts to distort fold balance — at ~19k human
-genes, 2% is ~380 members, about the size of the olfactory receptor family on
-its own. Treat 5% as a hard ceiling; above it the level is unusable regardless.
+**Selection rule: take the loosest level whose `max_family_pct` stays under a
+ceiling derived from k.** Loosest, because over-merging costs power while
+under-merging inflates the estimate. The ceiling exists because a family must
+pack into a fold: it may occupy at most `max_fold_fraction` (default 0.25) of
+one fold, and a fold is `1/k` of the corpus. At k=5 that is 5%; at k=10, 2.5%.
+
+Deriving it from k rather than fixing it matters — a fixed percentage silently
+becomes wrong when k changes, and it is a packing heuristic rather than a hard
+boundary. A level that misses narrowly while its largest family still sits
+well inside one fold is usually the better choice, so the run warns rather
+than silently falling through to a much stricter level.
+
+**Measured on human MANE (13,600 genes, k=5):**
+
+| level | families | singletons | max family | max % |
+|---|---|---|---|---|
+| loose | 9,546 | 7,453 (54.8%) | 364 | 2.68% |
+| medium | 11,027 | 9,459 (69.6%) | 278 | 2.04% |
+| strict | 12,584 | 11,837 (87.0%) | 23 | 0.17% |
+
+`loose` is the right blocking level. Its largest family is the C2H2 zinc
+fingers (364 members, coherent — `ZNF195, ZNF263, ZNF175, ZNF37A, …`), which
+is 13% of a fold at k=5 and packs without trouble. Its second largest is the
+Ras superfamily (94), which `medium` splits along known subfamily lines into
+RAB (27), RHO (17) and RAS (14) — so `loose` merges at superfamily level and
+`medium` at family level.
+
+`strict` is unusable despite the reassuring 0.17%: its top three families are
+*all* ZNF fragments (23, 15, 10), meaning it shreds the largest real gene
+family in the genome. 87% singletons is the tell. A small `max_family_pct` is
+not evidence of a good level — always confirm against `family_members.tsv`.
+
+An earlier fixed 2% ceiling picked `strict` here, because `medium` at 2.044%
+missed by six genes and the rule fell straight through. That knife-edge is
+what motivated both the k derivation and the near-miss warning.
 
 Expressing the rule as a percentage rather than a count is what makes it
 survive the move to multi-species: adding species grows the corpus and each
@@ -421,7 +463,7 @@ library(data.table)
 fam <- fread("runs/_cohorts/<cohort>/family/<hash>/family.tsv",
              na.strings = "NA")
 
-BLOCK_LEVEL <- "medium"   # per the selection rule in 1.7
+BLOCK_LEVEL <- "loose"    # measured choice for human MANE; see 1.7
 fam[, family_id := get(paste0("family_id_", BLOCK_LEVEL))]
 
 stopifnot(
