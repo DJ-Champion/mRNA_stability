@@ -1,0 +1,28 @@
+# configs/cohorts/synthetic_check.yaml
+# Cohort used by the end-to-end smoke test (tests/run_family_check.py).
+# Points at the `human_test` dataset with a synthetic CDS fixture supplied
+# via RUNS_ROOT. Not intended for real analysis.
+members:
+  - dataset: human_test
+    species: human
+    transl_table: 1
+
+search:
+  sensitivity: 7.5
+  max_seqs: 2000
+  evalue: 1.0e-3
+  min_cov: 0.4
+  cov_mode: 0
+  threads: 4
+
+levels:
+  strict: { min_nbs: 0.70, min_cov: 0.80, max_evalue: 1.0e-10, min_fident: 0.60 }
+  medium: { min_nbs: 0.40, min_cov: 0.65, max_evalue: 1.0e-5,  min_fident: 0.30 }
+  loose:  { min_nbs: 0.25, min_cov: 0.50, max_evalue: 1.0e-3,  min_fident: 0.20 }
+
+selection:
+  max_family_pct: 0.50    # tiny corpus; the real default is 0.02
+
+translate:
+  min_protein_len: 30
+  max_internal_stop_frac: 0.20   # the fixture plants one deliberately

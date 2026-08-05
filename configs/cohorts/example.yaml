@@ -1,0 +1,80 @@
+# configs/cohorts/example.yaml
+# A "cohort" = the set of datasets pooled into one all-vs-all protein search
+# for family clustering. Copy to <cohort_name>.yaml; the filename (minus
+# .yaml) is the identifier passed with --cohort.
+#
+# Output: $RUNS_ROOT/_cohorts/<cohort_name>/family/<search_hash>/
+#
+# A cohort of one dataset is the single-species case — nothing special-cases
+# it, so adding species later is purely additive. See FAMILY_CLUSTERING.md.
+
+# Datasets pooled into the search. Each needs a distinct species label:
+# protein IDs are '<species>|<gene_id>|<transcript_id>' and a repeated
+# species would make them ambiguous.
+members:
+  - dataset: human_test
+    species: human
+    transl_table: 1        # NCBI genetic code; 1 = standard
+  # - dataset: mouse_mane
+  #   species: mouse
+  #   transl_table: 1
+
+# The all-vs-all search. Changing anything here invalidates the alignment
+# table and produces a new <search_hash> directory; changing `levels:` below
+# does not.
+search:
+  sensitivity: 7.5         # mmseqs -s; 7.5 = maximum
+  max_seqs: 2000           # prefilter depth. Well above the default 300:
+                           # large families (olfactory receptors ~400, C2H2
+                           # zinc fingers ~700) would otherwise have their
+                           # hit lists truncated non-deterministically.
+  evalue: 1.0e-3           # search ceiling
+  min_cov: 0.4             # mmseqs -c
+  cov_mode: 0              # bidirectional coverage — both query and target
+  threads: 12
+
+# Clustering stringencies. All are computed and emitted as columns in
+# family.tsv; the downstream pipeline picks one to block on.
+#
+# Every level must be at least as tight as `search:` above — filtering can
+# only tighten, never loosen, without re-running the search. Violations
+# abort at config load rather than silently evaluating against edges that
+# were never searched for.
+#
+# min_nbs is the normalised bitscore, bits(q,t) / max(self_bits). It is the
+# primary anti-chaining lever and the criterion that travels best across a
+# phylogeny; keep min_fident low and let min_nbs and coverage decide.
+levels:
+  strict: { min_nbs: 0.60, min_cov: 0.80, max_evalue: 1.0e-10, min_fident: 0.50 }
+  medium: { min_nbs: 0.40, min_cov: 0.65, max_evalue: 1.0e-5,  min_fident: 0.30 }
+  loose:  { min_nbs: 0.25, min_cov: 0.50, max_evalue: 1.0e-3,  min_fident: 0.20 }
+
+# Selection rule applied to family_qc.tsv and reported at the end of a run:
+# recommend the loosest level whose largest family stays under the ceiling.
+# Over-merging is the safe direction, but a block larger than a fold cannot be
+# packed into balanced folds.
+#
+# The ceiling is derived from k rather than fixed, because the constraint is
+# really about packing: a family may take at most `max_fold_fraction` of one
+# fold, and a fold is 1/k of the corpus. At k=5 that is 0.25/5 = 5%.
+#
+# It is a heuristic, not a hard boundary. A level that misses it narrowly
+# while its largest family still sits well inside one fold is usually the
+# better choice, since under-merging is the unsafe error. The run warns when
+# a level lands just over.
+selection:
+  k_folds: 5                 # the k you will use downstream
+  max_fold_fraction: 0.25    # largest family as a share of one fold
+  # max_family_pct: 0.05     # explicit override, bypasses the k derivation
+
+# Translation controls.
+translate:
+  min_protein_len: 30            # drop shorter proteins after cleaning
+  max_internal_stop_frac: 0.05   # abort above this — signals the wrong
+                                 # transl_table or an upstream frame problem
+
+# Binary locations. Each falls back to $SEQKIT_BIN / $MMSEQS_BIN, then to
+# PATH. Missing binaries fail loudly at the stage that needs them.
+binaries: {}
+  # seqkit: /opt/seqkit/2.13.0/seqkit
+  # mmseqs: /opt/mmseqs/bin/mmseqs

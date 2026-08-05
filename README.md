@@ -10,6 +10,7 @@ half-life analysis.
                                                            manifest.tsv,
                                                            canonical.gff}
     01b_metrics.py    -> runs/<dataset>/metrics/<metric>.tsv
+    01c_family.py     -> runs/_cohorts/<cohort>/family/<search_hash>/family.tsv
     02_stratify.sh    -> runs/<dataset>/lists/{tier_<n>/, tier_<n>.txt, .lengths.tsv}
     03_calibrate.sh   -> runs/<dataset>/<tool>/calibration/<timestamp>/recommendations.tsv
     04_submit.sh      -> SLURM array per tier, calibrated resources
@@ -19,12 +20,14 @@ half-life analysis.
 containing one transcript per gene (the same transcripts whose sequences end
 up in the FASTAs). Metric plugins consume it directly.
 
-Three independent axes:
+Four independent axes:
 
 - **Dataset** = (genome, GFF, gene list, region selection). Defined in
   `configs/datasets/<name>.yaml`.
 - **Tool** = (worker, parameters, output schema). Defined in
   `configs/tools/<name>.sh` plus `tools/<name>/`.
+- **Cohort** = a set of datasets (1..n species) pooled for family
+  clustering. Defined in `configs/cohorts/<name>.yaml`.
 - **Cluster** = SLURM partition, concurrency, etc. Defined in
   `configs/cluster.sh` (machine-level).
 
@@ -63,6 +66,37 @@ Currently implemented:
 For planned metrics (`gc_by_position`, `kozak`, `stop_context`,
 `utr3_motifs`) and metrics explicitly out of scope (CAI / CSC, miRNA
 seeds, Nc), see `PLANNED_METRICS.md`.
+
+## Family clustering
+
+Groups genes into sequence families so that downstream cross-validation can
+hold every member of a family inside one fold. Without this, a paralogue in
+the training set and its twin in the test set inflate the performance
+estimate.
+
+    ./bin/01c_family.py --cohort human_only          # translate, search, cluster
+    ./bin/01c_family.py -c human_only --recluster    # re-threshold, reuse search
+    ./bin/01c_family.py --list-cohorts
+
+Runs on the head node — a ~19k-protein all-vs-all takes minutes, so no SLURM.
+Translates CDS to protein with `seqkit`, runs one permissive all-vs-all
+`mmseqs` search, then takes connected components of the filtered similarity
+graph at several stringencies. Output is one row per gene with a family label
+per level:
+
+    runs/_cohorts/<cohort>/family/<search_hash>/family.tsv
+
+Joinable to `manifest.tsv` and the metric tables on `gene_id`. A cohort may
+pool several species; orthologues merging into one family is intended, since
+training on the mouse copy and testing on the human one is leakage.
+
+The search and the clustering are deliberately decoupled: one expensive search
+produces a kept alignment table, and every threshold level is a cheap
+re-derivation from it (`--recluster`). `family_qc.tsv` reports the family-size
+distribution per level, and the run recommends a blocking level from it.
+
+See `FAMILY_CLUSTERING.md` for the full specification, the choice of
+normalised bitscore, and the downstream R recipe for blocked group k-fold.
 
 ### Configuring metrics
 
@@ -173,16 +207,22 @@ The `-d / -t` flags can be replaced with `DATASET=` and `TOOL=` env vars.
       tools/
         rnafold.sh                   # tool config: binaries, per-tier policy, calib hooks
         rnalfold.sh                  # (when added)
+      cohorts/
+        example.yaml                 # cohort config template
+        <cohort>.yaml                # datasets pooled for family clustering
 
     lib/
       paths.sh                       # shared arg parser + path resolver (bash side)
       paths.py                       # PathContext + resolve_paths (Python side)
       gff.py                         # shared GFF helpers for metric plugins
                                      #   (ID normalisation, gffutils DB, transcript index)
+      family.py                      # clustering helpers (translation cleanup,
+                                     #   union-find, normalised bitscore)
 
     bin/
       01_extract.py                  # dataset-level
       01b_metrics.py                 # dataset-level, plugin dispatcher
+      01c_family.py                  # cohort-level, family clustering
       02_stratify.sh                 # dataset-level
       03_calibrate.sh                # dataset + tool
       04_submit.sh                   # dataset + tool
@@ -213,6 +253,8 @@ The `-d / -t` flags can be replaced with `DATASET=` and `TOOL=` env vars.
       array.sbatch                   # generic launcher
 
     runs/                            # output, gitignored
+      _cohorts/
+        <cohort>/family/<search_hash>/   # family.tsv + QC, from 01c_family.py
       <dataset>/
         extracted_regions/           # shared across tools
         metrics/                     # shared across tools
