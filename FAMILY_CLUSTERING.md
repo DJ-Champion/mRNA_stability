@@ -107,6 +107,8 @@ runs/_cohorts/<cohort>/family/<search_hash>/
     proteins.tsv          per-protein metadata + the gene universe
     proteins.ids          gene universe, one ID per line (for the R appendix)
     hits.tsv              alignment table (kept artefact)
+    hits_rescued.tsv      --mask 0 re-search of low-complexity sequences,
+                          written only when some sequence lacks a self-hit
     family.tsv            PRIMARY OUTPUT -- the seam
     family_qc.tsv         per-level size distribution
     family_members.tsv    per-family composition (multi-species diagnostics)
@@ -234,10 +236,45 @@ Notes:
 self_bits[s] = bits of the row where query == target == s
 ```
 
-Then drop self-hit rows. If any protein lacks a self-hit — possible for
-low-complexity sequences that the prefilter discards — its normalised bitscore
-is undefined. Abort with the offending IDs listed rather than falling back
-silently.
+Then drop self-hit rows.
+
+**Low-complexity sequences need a rescue pass.** mmseqs masks low-complexity
+regions with tantan in the prefilter (`--mask 1`, the default). A sequence
+that is low-complexity along essentially its whole length retains no k-mers to
+seed on as a *database* entry, so nothing finds it — including itself.
+
+Two things are lost, not one:
+
+1. **The denominator.** No self-hit means no `self_bits`, so `nbs` is
+   undefined for every edge touching that sequence.
+2. **The edges.** If the sequence's homologues are also masked, the edges
+   between them disappear from the search entirely.
+
+Both were observed. On human MANE, a ~33%-Cys keratin-associated protein had
+no self-hit while appearing as a *query* with unambiguous paralogues
+(e-values 1e-71 and 1e-56, full coverage both ways, 54–59% identity). On a
+synthetic Cys/Gly/Ser-rich pair the failure was total: **zero rows** in the
+main search despite the two being 99.5% identical.
+
+Do **not** fall back to `self_bits[target]`. Where the query is the longer
+sequence, `max()` would have selected `self_bits[query]`, so the smaller
+denominator inflates `nbs` and admits edges that should have been rejected.
+
+Do **not** rerun the whole search with `--mask 0`. Unmasked all-vs-all is
+exactly what chains Cys-rich, Gly-rich and Ser-rich regions into one giant
+component.
+
+Instead, re-search only the affected sequences as queries against the *full*
+database with `--mask 0`, every other parameter matching the main run. This
+recovers their self-bitscores and their edges together, on the same scoring
+scale — masking decides whether an alignment is *found*, not how it is
+*scored* — and the recovered rows face the same level filters as everything
+else. Restricting the unmasked queries to the handful that need it keeps the
+chaining blast radius small.
+
+Append the rescued rows to the edge stream and re-harvest self-bits from them.
+If a protein still has no self-hit afterwards, abort with the offending IDs
+listed rather than letting it through as a silent singleton.
 
 **Normalised bitscore:**
 
@@ -276,9 +313,13 @@ evalue     <= level.max_evalue
 fident     >= level.min_fident
 ```
 
-Edges are undirected. mmseqs reports most pairs twice (`q→t` and `t→q`);
-harmless for connected components, but deduplicate to an unordered pair before
-counting edges for QC, or `n_edges` will be roughly doubled.
+Edges are undirected. mmseqs reports most pairs twice (`q→t` and `t→q`), so
+deduplicate to an unordered pair before counting edges for QC or `n_edges`
+will be roughly doubled. Do not shortcut this by counting only rows where
+`query < target`: a masked target can be reported in **one direction only**
+(the human KRTAP above appeared solely as a query), and that shortcut drops
+such edges from the count entirely. Deduplicate on the unordered pair itself.
+Direction never matters for the components — only for the QC total.
 
 ---
 
@@ -507,9 +548,17 @@ If clustering must happen in R anyway, read `hits.tsv` and:
 ```r
 library(data.table); library(igraph)
 
-hits <- fread("hits.tsv", col.names = c("query","target","fident","alnlen",
-                                        "evalue","bits","qcov","tcov",
-                                        "qlen","tlen"))
+COLS <- c("query","target","fident","alnlen","evalue","bits",
+          "qcov","tcov","qlen","tlen")
+
+# Read BOTH tables. hits_rescued.tsv holds the --mask 0 re-search of
+# low-complexity sequences (see 1.5) and exists only when some sequence
+# lacked a self-hit. Skipping it loses those sequences' self-bitscores AND
+# their edges, silently turning real families into singletons.
+hits <- fread("hits.tsv", col.names = COLS)
+if (file.exists("hits_rescued.tsv")) {
+  hits <- rbind(hits, fread("hits_rescued.tsv", col.names = COLS))
+}
 
 # 1. Harvest self-bits BEFORE dropping self-hits. Order-critical.
 self_bits <- hits[query == target, .(id = query, sb = bits)]

@@ -14,12 +14,20 @@ Designed family structure:
     B1, B2       ~72% aa identity                -> one family
     S1, S2, S3   independent                     -> three singletons
     X1           A1 with a planted internal stop -> must join family A
+    L1, L2       Cys/Gly/Ser-rich near-identical -> one family
 
-X1 is the load-bearing case. `seqkit translate --trim` truncates at the first
-stop rather than trimming the terminal one, which would reduce X1 to an ~80 aa
-stub, fail the coverage floors, and leave it a spurious singleton. That is
-under-merging, the unsafe direction for leakage, and it is silent. This check
-fails if that regression is ever reintroduced.
+Two load-bearing cases, both guarding silent under-merging:
+
+X1 — `seqkit translate --trim` truncates at the first stop rather than
+trimming the terminal one, which would reduce X1 to an ~80 aa stub, fail the
+coverage floors, and leave it a spurious singleton.
+
+L1/L2 — a keratin-associated-protein-like low-complexity pair. mmseqs masks
+these with tantan in the prefilter (`--mask 1`, the default), so they vanish
+from the main search entirely: no self-hit, and no edge to each other. Without
+the `--mask 0` rescue pass they end up as two singletons despite being near
+identical. Modelled on a real human MANE case (a ~33%-Cys KRTAP whose
+paralogues hit at e-values ~1e-71 while it had no self-hit).
 """
 from __future__ import annotations
 
@@ -41,6 +49,26 @@ STOPS = {'TAA', 'TAG', 'TGA'}
 CODONS = [a + b + c for a in BASES for b in BASES for c in BASES
           if a + b + c not in STOPS]
 N_CODONS = 160
+
+# One codon per residue; only used to turn the low-complexity protein fixture
+# back into a CDS the pipeline can translate.
+BACK_TRANSLATE = {
+    'A': 'GCT', 'C': 'TGT', 'D': 'GAT', 'E': 'GAA', 'F': 'TTT', 'G': 'GGT',
+    'H': 'CAT', 'I': 'ATT', 'K': 'AAA', 'L': 'CTT', 'M': 'ATG', 'N': 'AAT',
+    'P': 'CCT', 'Q': 'CAA', 'R': 'CGT', 'S': 'TCT', 'T': 'ACT', 'V': 'GTT',
+    'W': 'TGG', 'Y': 'TAT',
+}
+
+# Cys/Gly/Ser-rich motif in the style of a keratin-associated protein.
+LOW_COMPLEXITY_CORE = (
+    'MGCSGCSGGCGSSCGGCGSSCGGCGSGYGGCGSGCCVPVCCCKPVCCCVPACSCSSCGSCGGSKGVCGSCGG'
+    'CKGGCGSCGGSKGGCGSSCCVPVCCSSSCGSCGGSKGVCGFRGGSKGGCGSCGCSQCSCYKPCCCSSGCGSS'
+    'CCQSSCCKPSCSQSSCCKPCCSQSSCCKPCCCSSGCGSSCCQSSCCKPSCSQSSCCKPCCSQSSCC'
+)
+
+
+def back_translate(protein: str) -> str:
+    return ''.join(BACK_TRANSLATE[aa] for aa in protein) + 'TAA'
 
 
 def build_fixture(runs_root: Path) -> None:
@@ -64,11 +92,15 @@ def build_fixture(runs_root: Path) -> None:
     x1 = list(a1)
     x1[80] = 'TGA'                       # planted internal stop
 
+    lc1 = LOW_COMPLEXITY_CORE
+    lc2 = LOW_COMPLEXITY_CORE.replace('GGCGSSCGG', 'GGCGSTCGG')
+
     records = {
         'A1': seq(a1), 'A2': seq(mutate(a1, 0.05)), 'A3': seq(mutate(a1, 0.14)),
         'B1': seq(b1), 'B2': seq(mutate(b1, 0.28)),
         'S1': seq(cds(N_CODONS)), 'S2': seq(cds(N_CODONS)), 'S3': seq(cds(N_CODONS)),
         'X1': seq(x1),
+        'L1': back_translate(lc1), 'L2': back_translate(lc2),
     }
 
     out = runs_root / 'human_test' / 'extracted_regions'
@@ -94,7 +126,7 @@ def check(rows: list[dict], failures: list[str]) -> None:
         if not cond:
             failures.append(label)
 
-    expect("all 9 genes present", len(rows) == 9)
+    expect("all 11 genes present", len(rows) == 11)
     expect("no missing family assignment",
            all(r.get('family_id_medium') for r in rows))
 
@@ -117,6 +149,13 @@ def check(rows: list[dict], failures: list[str]) -> None:
            by_gene['GENEX1']['protein_len'] == by_gene['GENEA1']['protein_len'])
     expect("only X1 has an internal stop",
            sum(1 for r in rows if r['had_internal_stop'] == 'true') == 1)
+
+    # The --mask 0 rescue guard: tantan removes this pair from the main search
+    # entirely, so without the rescue pass they are two singletons.
+    expect("low-complexity pair recovered into one family",
+           fam['GENEL1'] == fam['GENEL2'])
+    expect("low-complexity pair not merged into an unrelated family",
+           by_gene['GENEL1']['family_size_medium'] == '2')
 
     expect("strict is at least as fine as medium",
            len({r['family_id_strict'] for r in rows})

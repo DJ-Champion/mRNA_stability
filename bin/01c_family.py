@@ -382,6 +382,80 @@ def stage_search(cohort: Cohort, out_dir: Path, force: bool,
              f"({hits.stat().st_size / 1e6:.1f} MB)")
 
 
+def rescue_masked(cohort: Cohort, out_dir: Path, missing: list[str]) -> Path:
+    """Re-search sequences that the prefilter masked out, with masking off.
+
+    mmseqs masks low-complexity regions with tantan in the prefilter
+    (`--mask 1`, the default). A sequence that is low-complexity along
+    essentially its whole length keeps no k-mers to seed on as a *database*
+    entry, so nothing finds it — including itself. It can still act as a
+    query, so it appears in hits.tsv with real, high-scoring homologues while
+    having no self-hit row.
+
+    Observed on human MANE: a ~33%-Cys keratin-associated protein with
+    unambiguous paralogues (e-values ~1e-71, full coverage both ways) and no
+    self-hit.
+
+    Two things are lost, not one. The missing self-hit costs the normalised
+    bitscore its denominator. But if *both* sides of a low-complexity family
+    are masked, the edges between them disappear from the search entirely —
+    verified on a synthetic Cys/Gly/Ser-rich pair, which produced no rows at
+    all. Recovering only the self-bitscore would leave those paralogues as
+    separate singletons: silent under-merging, the unsafe direction.
+
+    So the affected sequences are re-searched as queries against the *full*
+    database with `--mask 0`, recovering their self-bitscores and their edges
+    in one pass. Every other search parameter matches the main run, so the
+    recovered rows are on the same footing and face the same level filters.
+
+    Rerunning the entire search unmasked is not an option — unmasked
+    all-vs-all is exactly what chains Cys-rich, Gly-rich and Ser-rich regions
+    into a single component. Restricting the unmasked queries to the handful
+    that need it keeps that blast radius small, and any spurious low-complexity
+    match still has to clear the nbs and coverage floors, which a partial
+    match against a longer protein will not.
+
+    Falling back to `self_bits[target]` instead would be unsafe: where the
+    query is the longer sequence, max() would have selected `self_bits[query]`,
+    so substituting the smaller denominator inflates nbs and admits edges that
+    should have been rejected.
+    """
+    mmseqs = _require_binary(cohort.mmseqs_bin, 'mmseqs')
+    faa = out_dir / 'proteins.faa'
+    sub_faa = out_dir / 'tmp_masked_queries.faa'
+    rescued = out_dir / 'hits_rescued.tsv'
+    tmp_dir = out_dir / 'mmseqs_rescue_tmp'
+    s = cohort.search
+
+    want = set(missing)
+    with open(sub_faa, 'w') as fh:
+        for rid, seq in iter_fasta(faa):
+            if rid in want:
+                fh.write(f">{rid}\n")
+                for i in range(0, len(seq), 60):
+                    fh.write(seq[i:i + 60] + '\n')
+
+    cmd = [mmseqs, 'easy-search', str(sub_faa), str(faa),
+           str(rescued), str(tmp_dir),
+           '--mask', '0',                       # the whole point of this pass
+           '-s', str(s.sensitivity),
+           '-e', str(s.evalue),
+           '-c', str(s.min_cov),
+           '--cov-mode', str(s.cov_mode),
+           '--max-seqs', str(s.max_seqs),
+           '--threads', str(s.threads),
+           '--format-output', _FORMAT_OUTPUT,
+           '-v', '1']
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        _die(f"masked-sequence rescue search failed (exit {proc.returncode}):\n"
+             f"{proc.stderr}")
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    sub_faa.unlink(missing_ok=True)
+    return rescued
+
+
 # ---------------------------------------------------------------------------
 # Stage 3 — cluster
 # ---------------------------------------------------------------------------
@@ -401,49 +475,70 @@ def stage_cluster(cohort: Cohort, out_dir: Path, force: bool) -> None:
     index = {pid: i for i, pid in enumerate(ids)}
     n = len(ids)
 
-    # Pass 1 — harvest self-bits BEFORE dropping self-hits. Order-critical:
-    # the normalised bitscore denominator comes from these rows.
+    def harvest_self_bits(path: Path, into: dict[str, float]) -> None:
+        """Self-bits must be read BEFORE self-hits are dropped. Order-critical:
+        the normalised bitscore denominator comes from exactly these rows."""
+        with open(path) as fh:
+            for row in csv.reader(fh, delimiter='\t'):
+                if row[H_QUERY] == row[H_TARGET]:
+                    into[row[H_QUERY]] = float(row[H_BITS])
+
     log.info("Pass 1/2: harvesting self-bitscores …")
+    hit_files = [hits]
     self_bits: dict[str, float] = {}
-    with open(hits) as fh:
-        for row in csv.reader(fh, delimiter='\t'):
-            if row[H_QUERY] == row[H_TARGET]:
-                self_bits[row[H_QUERY]] = float(row[H_BITS])
+    harvest_self_bits(hits, self_bits)
 
     absent = [pid for pid in ids if pid not in self_bits]
     if absent:
-        shown = '\n  '.join(absent[:10])
-        _die(f"{len(absent)} protein(s) have no self-hit, so their normalised "
-             f"bitscore is undefined. Usually low-complexity sequences dropped "
-             f"by the prefilter. First few:\n  {shown}\n"
-             f"Raise --max-seqs or exclude these sequences; do not let them "
-             f"through as silent singletons.")
+        # tantan masked these out of the target database. They lose both their
+        # denominator and, if their homologues were masked too, their edges.
+        log.info(f"{len(absent)} protein(s) have no self-hit (low-complexity "
+                 f"masking); re-searching them with --mask 0 …")
+        rescued = rescue_masked(cohort, out_dir, absent)
+        hit_files.append(rescued)
+        harvest_self_bits(rescued, self_bits)
+
+        still = [pid for pid in absent if pid not in self_bits]
+        if still:
+            shown = '\n  '.join(still[:10])
+            _die(f"{len(still)} protein(s) still have no self-hit after the "
+                 f"--mask 0 rescue pass, so their normalised bitscore is "
+                 f"undefined. First few:\n  {shown}\n"
+                 f"Exclude these sequences from the cohort; do not let them "
+                 f"through as silent singletons.")
+
+        n_rows = sum(1 for _ in open(rescued))
+        log.info(f"Recovered {len(absent)} self-bitscore(s) and {n_rows} "
+                 f"alignment row(s) → {rescued.name}")
 
     # Pass 2 — stream edges once, testing every level per row. Avoids holding
     # the (potentially multi-million-row) edge set in memory.
     log.info(f"Pass 2/2: building components for {len(cohort.levels)} level(s) …")
     ufs = {lv.name: UnionFind(n) for lv in cohort.levels}
-    edge_counts = {lv.name: 0 for lv in cohort.levels}
+    # Undirected edges, deduplicated by encoded index pair. A masked target
+    # can be reported in one direction only, so counting rows where q < t
+    # would silently drop those edges from the QC total. One int per accepted
+    # edge; the alignment rows themselves are never held in memory.
+    edge_sets: dict[str, set[int]] = {lv.name: set() for lv in cohort.levels}
 
-    with open(hits) as fh:
-        for row in csv.reader(fh, delimiter='\t'):
-            q, t = row[H_QUERY], row[H_TARGET]
-            if q == t:
-                continue
-            iq, it = index.get(q), index.get(t)
-            if iq is None or it is None:
-                continue
-            bits = float(row[H_BITS])
-            nbs = normalised_bitscore(bits, self_bits[q], self_bits[t])
-            qcov, tcov = float(row[H_QCOV]), float(row[H_TCOV])
-            evalue, fident = float(row[H_EVALUE]), float(row[H_FIDENT])
-            for lv in cohort.levels:
-                if lv.accepts(nbs, qcov, tcov, evalue, fident):
-                    ufs[lv.name].union(iq, it)
-                    # Count each undirected edge once. --cov-mode 0 applies
-                    # symmetric criteria, so mmseqs reports both directions.
-                    if q < t:
-                        edge_counts[lv.name] += 1
+    for hit_file in hit_files:
+        with open(hit_file) as fh:
+            for row in csv.reader(fh, delimiter='\t'):
+                q, t = row[H_QUERY], row[H_TARGET]
+                if q == t:
+                    continue
+                iq, it = index.get(q), index.get(t)
+                if iq is None or it is None:
+                    continue
+                bits = float(row[H_BITS])
+                nbs = normalised_bitscore(bits, self_bits[q], self_bits[t])
+                qcov, tcov = float(row[H_QCOV]), float(row[H_TCOV])
+                evalue, fident = float(row[H_EVALUE]), float(row[H_FIDENT])
+                key = iq * n + it if iq < it else it * n + iq
+                for lv in cohort.levels:
+                    if lv.accepts(nbs, qcov, tcov, evalue, fident):
+                        ufs[lv.name].union(iq, it)
+                        edge_sets[lv.name].add(key)
 
     family_of: dict[str, list[str]] = {}
     qc_rows: list[dict] = []
@@ -460,7 +555,7 @@ def stage_cluster(cohort: Cohort, out_dir: Path, force: bool) -> None:
         largest = groups[0]                      # sorted size-desc by construction
         qc_rows.append({
             'level': lv.name,
-            'n_edges': edge_counts[lv.name],
+            'n_edges': len(edge_sets[lv.name]),
             'n_genes': n,
             'n_families': len(groups),
             'n_singletons': n_singletons,
