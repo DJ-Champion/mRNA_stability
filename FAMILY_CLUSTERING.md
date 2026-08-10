@@ -451,9 +451,73 @@ large family or chaining, and the member list tells you which within a minute.
 
 ---
 
+### 1.8 Auditing what the protein basis misses
+
+Protein clustering captures CDS-level relatedness well and says nothing
+directly about UTRs — yet UTR-derived features (uORFs, 5'/3' structure, 3'UTR
+composition) carry much of the signal in a stability model. `bin/01d_family_audit.py`
+measures that residual:
+
+```bash
+./bin/01d_family_audit.py --cohort human_only --level loose
+./bin/01d_family_audit.py -c human_only -l loose --regions 3UTR,5UTR,CDS
+```
+
+For every gene and region it finds the most similar gene in a **different**
+family. That is the leakage candidate — genes in different families may land
+in different splits, so high nucleotide identity between them is similarity
+the blocking does not prevent. Within-family similarity is reported alongside
+as a control, since it is blocked by construction.
+
+The audit is **split-agnostic**: it audits the family partition itself, not a
+particular train/test assignment, so one run covers k-fold and holdout alike.
+
+Outputs under `<family_dir>/audit/<level>/`:
+
+| file | contents |
+|---|---|
+| `audit_summary.tsv` | per region: % of genes with any cross-family hit, identity percentiles, counts at ≥0.70/0.80/0.90/0.95 |
+| `audit_per_gene.tsv` | per gene per region: max cross-family identity, the partner gene, coverages, max within-family identity |
+| `audit_pairs.tsv` | every cross-family pair above `--report-identity`, sorted by identity |
+
+**Reading it.** If cross-family identity has no meaningful tail above ~0.70–0.80
+at real coverage, protein-based blocking is sufficient and the CDS-only basis
+is defensible — with a figure rather than an assumption. If there is a tail,
+`audit_pairs.tsv` names the responsible pairs.
+
+Shared-repeat matches (an Alu in two unrelated 3'UTRs) are largely excluded by
+`--min-cov` (default 0.5, both query and target): 300 bp of Alu inside a 2 kb
+UTR cannot reach 50% coverage. This is the same coverage discipline that stops
+shared protein domains welding families together in 1.5. Short UTRs where the
+repeat *is* most of the sequence will still surface, and there it is genuinely
+arguable whether that is leakage or signal.
+
+**If the tail is real**, the fix is not to re-label anything. The union-find in
+1.6 does not care where edges come from, so nucleotide edges can feed the same
+graph and families become components of the union — a pair is linked if it is
+protein-similar *or* UTR-similar.
+
+---
+
 ## Part 2 — Downstream (R)
 
 Consumes `family.tsv` only.
+
+### 2.0 The unit of observation is the gene
+
+Worth stating explicitly, because it dissolves a question that otherwise looks
+hard. The response (half-life) is measured per transcript, and the join recipe
+in `METRICS.md` produces **one row per transcript** with region-prefixed
+feature columns.
+
+So a region is not an observation — it is a *column* on the gene's row. There
+is no separate family label for the 5'UTR, and no separate decision about
+which split the 3'UTR lands in: a gene's regions travel with the gene. One row,
+one family label, one split assignment.
+
+This changes only if a region-level model is ever built (predicting decay from
+3'UTR features alone, with UTRs as observations). Then the unit changes and the
+blocking has to follow it.
 
 ### 2.1 Ingest and choose a blocking level
 

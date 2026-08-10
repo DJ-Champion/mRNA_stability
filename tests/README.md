@@ -21,12 +21,19 @@ cleanly if `seqkit` or `mmseqs` is not on PATH:
     python tests/run_family_check.py
     python tests/run_family_check.py --keep-outputs /tmp/family_check -v
 
+The audit check runs the family pipeline then audits it, using the same
+fixture (which plants one cross-family 3'UTR pair for it to find):
+
+    python tests/run_audit_check.py
+    python tests/run_audit_check.py --keep-outputs /tmp/audit_check -v
+
 ## Layout
 
     tests/
       conftest.py                          # puts repo root on sys.path
       run_synthetic_check.py               # CLI runner (no pytest required)
       run_family_check.py                  # family clustering, end-to-end
+      run_audit_check.py                   # nucleotide leakage audit, end-to-end
       test_nmd_fragility_synthetic.py      # the three-model sanity check
       test_lib_family.py                   # lib/family.py units
       fixtures/

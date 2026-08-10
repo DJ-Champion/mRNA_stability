@@ -78,7 +78,14 @@ def back_translate(protein: str) -> str:
 
 
 def build_fixture(runs_root: Path) -> None:
-    """Write extracted_CDS.fa for the `human_test` dataset under runs_root."""
+    """Write extracted_CDS.fa (and extracted_3UTR.fa) for `human_test`.
+
+    The 3'UTRs are independent random sequence, EXCEPT S1/S2 which are ~92%
+    identical. S1 and S2 are singletons in different protein families, so that
+    pair is cross-family nucleotide similarity — invisible to protein-based
+    blocking, and the case tests/run_audit_check.py exists to detect. 01c
+    ignores this file; only the audit reads it.
+    """
     rng = random.Random(20260804)
 
     def cds(n):
@@ -115,6 +122,20 @@ def build_fixture(runs_root: Path) -> None:
     with open(out / 'extracted_CDS.fa', 'w') as fh:
         for name, s in records.items():
             fh.write(f">GENE{name}_TX{name}.1_CDS\n{s}\n")
+
+    def dna(n):
+        return ''.join(rng.choice('ACGT') for _ in range(n))
+
+    utrs = {name: dna(1100) for name in records}
+    # S1/S2 share a 3'UTR at ~92% identity while their proteins are unrelated.
+    s2 = list(utrs['S1'])
+    for i in rng.sample(range(len(s2)), int(len(s2) * 0.08)):
+        s2[i] = rng.choice('ACGT')
+    utrs['S2'] = ''.join(s2)
+
+    with open(out / 'extracted_3UTR.fa', 'w') as fh:
+        for name, s in utrs.items():
+            fh.write(f">GENE{name}_TX{name}.1_3UTR\n{s}\n")
 
 
 def find_family_tsv(runs_root: Path) -> Path:
