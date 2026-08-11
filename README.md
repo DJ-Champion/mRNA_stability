@@ -95,6 +95,11 @@ produces a kept alignment table, and every threshold level is a cheap
 re-derivation from it (`--recluster`). `family_qc.tsv` reports the family-size
 distribution per level, and the run recommends a blocking level from it.
 
+Families also absorb a second edge source: genes whose **exons overlap in the
+genome** are transcribed from the same DNA, so their features are related
+whether or not the genes are homologous. Those pairs are read from
+`canonical.gff` and merged into the same families (`locus_overlap_pairs.tsv`).
+
 ### Auditing the blocking
 
 Families are built from protein similarity, which captures CDS relatedness but

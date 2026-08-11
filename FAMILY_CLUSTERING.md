@@ -112,6 +112,7 @@ runs/_cohorts/<cohort>/family/<search_hash>/
     hits_rescued.tsv      --mask 0 re-search of low-complexity sequences,
                           written only when some sequence lacks a self-hit
     family.tsv            PRIMARY OUTPUT -- the seam
+    locus_overlap_pairs.tsv  gene pairs sharing exonic sequence (see 1.6b)
     family_qc.tsv         per-level size distribution
     family_members.tsv    per-family composition (multi-species diagnostics)
     params.yaml           resolved config + tool versions
@@ -359,6 +360,47 @@ Suggested implementation: `scipy.sparse.csgraph.connected_components` on a COO
 matrix, or a plain union-find. Both are linear-ish; neither is a bottleneck
 next to the search.
 
+### 1.6b Locus overlap — the second edge source
+
+Protein similarity is not the only reason two genes' features can be
+non-independent. Genes whose **exons overlap in the genome** are transcribed
+from the same DNA, so their extracted regions share sequence — and the genes
+need not be homologous at all, which is precisely why protein clustering
+cannot see it.
+
+Found empirically via the audit in 1.8: ~67 human gene pairs (~134 genes of
+13,601) with 100% 3'UTR identity, mostly **antisense**, all confirmed as
+overlapping annotations. One pair shared 3,197 nt.
+
+```yaml
+locus_overlap:
+  enabled: true
+  min_overlap_bp: 100
+```
+
+Three decisions worth stating:
+
+* **Exons, not gene spans.** A gene nested inside another's intron overlaps in
+  span while sharing no transcribed sequence; its features are independent and
+  it must not be linked. Only exonic overlap means shared sequence.
+* **Both strands count.** An antisense overlap still means the same DNA. The
+  two extracted regions are reverse complements, so length and GC are identical
+  by construction and structure is correlated. Orientation does not rescue
+  independence.
+* **Not a similarity threshold.** Overlap is binary, so the same edges are
+  applied at every level.
+
+Edges feed the same union-find as the sequence edges, so families are the
+connected components of the union — a pair is linked if it is protein-similar
+**or** locus-overlapping. `locus_overlap_pairs.tsv` records every pair with
+its overlap length, strands and which levels it actually merged;
+`family_qc.tsv` reports `n_locus_overlap_merges` per level.
+
+Note that `canonical.gff` carries no `gene` features — `write_filtered_gff` in
+`bin/01_extract.py` keeps only lines linked to a retained transcript, and
+gene rows have no such link. Gene coordinates therefore come from the
+`gene_id` attribute on exon rows.
+
 ---
 
 ### 1.7 Outputs
@@ -390,6 +432,7 @@ real singleton family ID rather than being omitted.
 |---|---|
 | `level` | strict / medium / loose |
 | `n_edges` | deduplicated undirected edges |
+| `n_locus_overlap_merges` | families joined by locus overlap that sequence similarity had not already joined (see 1.6b) |
 | `n_genes` | corpus size |
 | `n_families` | components |
 | `n_singletons` | families of size 1 |
@@ -478,7 +521,17 @@ Outputs under `<family_dir>/audit/<level>/`:
 |---|---|
 | `audit_summary.tsv` | per region: % of genes with any cross-family hit, identity percentiles, counts at ≥0.70/0.80/0.90/0.95 |
 | `audit_per_gene.tsv` | per gene per region: max cross-family identity, the partner gene, coverages, max within-family identity |
-| `audit_pairs.tsv` | every cross-family pair above `--report-identity`, sorted by identity |
+| `audit_pairs.tsv` | every cross-family pair above `--report-identity`, sorted by identity, with a `strand` column |
+
+**Both strands are searched**, pinned with `--strand 2`. An antisense match
+means the two genes are transcribed from the same DNA, which is exactly the
+locus-overlap leakage of 1.6b, so it must be found. Note that mmseqs already
+behaves this way by default even though its `--strand` help reports a default
+of `1` (forward only) — verified empirically; `--strand 1` really is forward
+only, but `easy-search` defaults to `2`. Pinning keeps the intent visible and
+survives a corrected default. mmseqs signals a reverse-complement hit by
+reporting query coordinates in descending order, which is how the `strand`
+column is derived.
 
 **Reading it.** If cross-family identity has no meaningful tail above ~0.70–0.80
 at real coverage, protein-based blocking is sufficient and the CDS-only basis

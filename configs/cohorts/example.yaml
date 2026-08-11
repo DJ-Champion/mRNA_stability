@@ -67,6 +67,23 @@ selection:
   max_fold_fraction: 0.25    # largest family as a share of one fold
   # max_family_pct: 0.05     # explicit override, bypasses the k derivation
 
+# Third edge source, alongside the protein search. Genes whose EXONS overlap
+# in the genome are transcribed from the same DNA, so their extracted regions
+# share sequence and their features are related whether or not the genes are
+# homologous. Protein clustering cannot see this — the genes need not be
+# related at all — so it is applied as a separate axis.
+#
+# Exons, not gene spans: a gene nested inside another's intron shares no
+# transcribed sequence and must not be linked.
+#
+# Antisense overlaps count too. A reverse-complement shared region still gives
+# the pair identical length and GC by construction.
+#
+# Measured on human MANE: ~67 gene pairs, ~134 genes out of 13,601.
+locus_overlap:
+  enabled: true
+  min_overlap_bp: 100      # ignore incidental few-base overlaps
+
 # Translation controls.
 translate:
   min_protein_len: 30            # drop shorter proteins after cleaning

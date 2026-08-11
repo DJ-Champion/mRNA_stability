@@ -68,8 +68,9 @@ logging.basicConfig(
 log = logging.getLogger('audit')
 
 # hits column order — must match --format-output below.
-H_QUERY, H_TARGET, H_FIDENT, H_EVALUE, H_QCOV, H_TCOV, H_QLEN, H_TLEN = range(8)
-_FORMAT_OUTPUT = 'query,target,fident,evalue,qcov,tcov,qlen,tlen'
+(H_QUERY, H_TARGET, H_FIDENT, H_EVALUE, H_QCOV, H_TCOV, H_QLEN, H_TLEN,
+ H_QSTART, H_QEND) = range(10)
+_FORMAT_OUTPUT = 'query,target,fident,evalue,qcov,tcov,qlen,tlen,qstart,qend'
 
 # UTR_pair is a 3-line format with a ViennaRNA constraint line, not FASTA.
 _DEFAULT_SKIP = ('UTR_pair',)
@@ -181,6 +182,13 @@ def search_region(mmseqs: str, fa: Path, out_tsv: Path, tmp: Path,
            '--cov-mode', '0',
            '--max-seqs', '2000',
            '--threads', str(threads),
+           # Both strands, pinned explicitly. An antisense match means the two
+           # genes are transcribed from the same DNA, which is a leakage source
+           # worth finding. mmseqs already behaves this way by default, but its
+           # --strand help reports a default of 1 (forward only) while
+           # easy-search actually behaves like 2 — verified empirically. Pinning
+           # it keeps the intent visible and survives a future default change.
+           '--strand', '2',
            '--format-output', _FORMAT_OUTPUT,
            '-v', '3' if verbose else '1']
     proc = subprocess.run(cmd)
@@ -231,12 +239,18 @@ def analyse_region(region: str, hits: Path, family_of: dict[str, str],
             key = (q, t) if q < t else (t, q)
             if key not in seen_pair:
                 seen_pair.add(key)
+                # mmseqs reports a reverse-complement match with the query
+                # coordinates descending. An antisense hit means the pair share
+                # the same DNA read in opposite directions — worth seeing as
+                # such rather than looking like an unexplained perfect match.
+                antisense = int(row[H_QSTART]) > int(row[H_QEND])
                 cross_pairs.append({
                     'region': region,
                     'gene_a': key[0], 'gene_b': key[1],
                     'family_a': family_of[key[0]], 'family_b': family_of[key[1]],
                     'identity': f'{fident:.4f}',
                     'qcov': f'{qcov:.4f}', 'tcov': f'{tcov:.4f}',
+                    'strand': 'antisense' if antisense else 'sense',
                     'evalue': row[H_EVALUE],
                 })
 
@@ -419,7 +433,7 @@ def main():
     else:
         (out_dir / 'audit_pairs.tsv').write_text(
             'region\tgene_a\tgene_b\tfamily_a\tfamily_b\t'
-            'identity\tqcov\ttcov\tevalue\n')
+            'identity\tqcov\ttcov\tstrand\tevalue\n')
 
     report(summaries, args.min_cov)
     log.info(f"{len(all_pairs)} cross-family pair(s) at >= "

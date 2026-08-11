@@ -42,6 +42,13 @@ selection:
   max_fold_fraction: 0.25
   # max_family_pct: 0.05     # explicit override, bypasses the k derivation
 
+# Genes whose exons overlap share DNA, so their region features are related
+# regardless of homology — an axis protein clustering cannot see. Found via the
+# nucleotide audit: ~67 pairs (~134 genes), mostly antisense, at 100% identity.
+locus_overlap:
+  enabled: true
+  min_overlap_bp: 100
+
 translate:
   min_protein_len: 30
   max_internal_stop_frac: 0.05
