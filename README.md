@@ -95,6 +95,24 @@ produces a kept alignment table, and every threshold level is a cheap
 re-derivation from it (`--recluster`). `family_qc.tsv` reports the family-size
 distribution per level, and the run recommends a blocking level from it.
 
+Families also absorb a second edge source: genes whose **exons overlap in the
+genome** are transcribed from the same DNA, so their features are related
+whether or not the genes are homologous. Those pairs are read from
+`canonical.gff` and merged into the same families (`locus_overlap_pairs.tsv`).
+
+### Auditing the blocking
+
+Families are built from protein similarity, which captures CDS relatedness but
+says nothing directly about UTRs — where much of the stability signal lives.
+`01d_family_audit.py` measures that residual:
+
+    ./bin/01d_family_audit.py --cohort human_only --level medium
+
+For each gene and region it finds the most similar gene in a *different*
+family: the pairs that can land on opposite sides of a split. Split-agnostic,
+so one run covers k-fold and holdout alike. Results land under
+`<family_dir>/audit/<level>/`, with `audit_pairs.tsv` naming the offenders.
+
 See `FAMILY_CLUSTERING.md` for the full specification, the choice of
 normalised bitscore, and the downstream R recipe for blocked group k-fold.
 
@@ -223,6 +241,7 @@ The `-d / -t` flags can be replaced with `DATASET=` and `TOOL=` env vars.
       01_extract.py                  # dataset-level
       01b_metrics.py                 # dataset-level, plugin dispatcher
       01c_family.py                  # cohort-level, family clustering
+      01d_family_audit.py            # cohort-level, nucleotide leakage audit
       02_stratify.sh                 # dataset-level
       03_calibrate.sh                # dataset + tool
       04_submit.sh                   # dataset + tool

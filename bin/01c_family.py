@@ -45,9 +45,10 @@ _PROJECT_ROOT = _THIS.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from lib.family import (  # noqa: E402
-    Level, SearchParams, UnionFind, canonical_families, iter_fasta,
-    make_protein_id, normalised_bitscore, post_process_translation,
-    search_hash, split_protein_id, validate_level_within_search,
+    Level, SearchParams, UnionFind, canonical_families, find_overlapping_gene_pairs,
+    gene_exons_from_gff, iter_fasta, make_protein_id, normalised_bitscore,
+    post_process_translation, search_hash, split_protein_id,
+    validate_level_within_search,
 )
 from lib.gff import normalise_id, split_composite_fasta_id  # noqa: E402
 from lib.paths import resolve_paths  # noqa: E402
@@ -68,6 +69,7 @@ _FORMAT_OUTPUT = 'query,target,fident,alnlen,evalue,bits,qcov,tcov,qlen,tlen'
 _DEFAULT_MIN_PROTEIN_LEN = 30
 _DEFAULT_MAX_INTERNAL_STOP_FRAC = 0.05
 _DEFAULT_MAX_FAMILY_PCT = 0.02
+_DEFAULT_MIN_OVERLAP_BP = 100
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +146,14 @@ class Cohort:
                  + "\n\nFiltering can only tighten. Either tighten the level or "
                    "loosen 'search:' and re-run the search.")
 
+        # Third edge source. Genes whose exons overlap are transcribed from the
+        # same DNA, so their region features are related whether or not they
+        # are homologous — a gap protein clustering cannot see. Not a
+        # similarity threshold, so the same edges apply at every level.
+        lo = config.get('locus_overlap') or {}
+        self.locus_overlap_enabled = bool(lo.get('enabled', True))
+        self.min_overlap_bp = int(lo.get('min_overlap_bp', _DEFAULT_MIN_OVERLAP_BP))
+
         t = config.get('translate') or {}
         self.min_protein_len = int(t.get('min_protein_len', _DEFAULT_MIN_PROTEIN_LEN))
         self.max_internal_stop_frac = float(
@@ -216,6 +226,12 @@ def _member_cds_fasta(cohort: Cohort, member: dict) -> Path:
     paths = resolve_paths(member['dataset'], cohort.project_root,
                           species=member['species'])
     return paths.extract_dir / 'extracted_CDS.fa'
+
+
+def _member_canonical_gff(cohort: Cohort, member: dict) -> Path:
+    paths = resolve_paths(member['dataset'], cohort.project_root,
+                          species=member['species'])
+    return paths.canonical_gff
 
 
 def stage_translate(cohort: Cohort, out_dir: Path, force: bool) -> None:
@@ -492,7 +508,10 @@ def stage_cluster(cohort: Cohort, out_dir: Path, force: bool) -> None:
     ptsv = out_dir / 'proteins.tsv'
     family_tsv = out_dir / 'family.tsv'
 
-    if not force and _is_current(family_tsv, [hits, ptsv, cohort_yaml_path(cohort)]):
+    deps = [hits, ptsv, cohort_yaml_path(cohort)]
+    if cohort.locus_overlap_enabled:
+        deps += [_member_canonical_gff(cohort, m) for m in cohort.members]
+    if not force and _is_current(family_tsv, deps):
         log.info("Clustering current — skipping.")
         return
 
@@ -571,6 +590,52 @@ def stage_cluster(cohort: Cohort, out_dir: Path, force: bool) -> None:
                         ufs[lv.name].union(iq, it)
                         edge_sets[lv.name].add(key)
 
+    # Third edge source: exonic overlap in the genome. Applied after the
+    # sequence edges so the merge counts report what locus overlap added
+    # beyond homology.
+    locus_merges = {lv.name: 0 for lv in cohort.levels}
+    overlap_rows: list[dict] = []
+    if cohort.locus_overlap_enabled:
+        gene_index = {(p['species'], p['gene_id']): i
+                      for i, p in enumerate(proteins)}
+        for member in cohort.members:
+            gff = _member_canonical_gff(cohort, member)
+            if not gff.exists():
+                log.warning(f"No canonical.gff for {member['dataset']} — "
+                            f"skipping locus overlap for it.")
+                continue
+            species = member['species']
+            pairs = find_overlapping_gene_pairs(
+                gene_exons_from_gff(gff), cohort.min_overlap_bp)
+            for ga, gb, chrom, bp, sa, sb in pairs:
+                ia = gene_index.get((species, ga))
+                ib = gene_index.get((species, gb))
+                if ia is None or ib is None:
+                    continue          # gene not in the cohort (filtered upstream)
+                merged_at = []
+                for lv in cohort.levels:
+                    if ufs[lv.name].union(ia, ib):
+                        locus_merges[lv.name] += 1
+                        merged_at.append(lv.name)
+                    edge_sets[lv.name].add(
+                        ia * n + ib if ia < ib else ib * n + ia)
+                overlap_rows.append({
+                    'species': species, 'gene_a': ga, 'gene_b': gb,
+                    'chrom': chrom, 'overlap_bp': bp,
+                    'strand_a': sa, 'strand_b': sb,
+                    'same_strand': 'true' if sa == sb else 'false',
+                    'merged_levels': ','.join(merged_at) or 'none',
+                })
+        if overlap_rows:
+            _write_tsv(out_dir / 'locus_overlap_pairs.tsv',
+                       list(overlap_rows[0].keys()), overlap_rows)
+            merges = ', '.join(f"{k}:{v}" for k, v in locus_merges.items())
+            log.info(f"Locus overlap: {len(overlap_rows)} gene pair(s) sharing "
+                     f">= {cohort.min_overlap_bp} bp of exonic sequence; "
+                     f"families merged — {merges}")
+        else:
+            log.info("Locus overlap: no qualifying gene pairs.")
+
     family_of: dict[str, list[str]] = {}
     qc_rows: list[dict] = []
     member_rows: list[dict] = []
@@ -587,6 +652,7 @@ def stage_cluster(cohort: Cohort, out_dir: Path, force: bool) -> None:
         qc_rows.append({
             'level': lv.name,
             'n_edges': len(edge_sets[lv.name]),
+            'n_locus_overlap_merges': locus_merges[lv.name],
             'n_genes': n,
             'n_families': len(groups),
             'n_singletons': n_singletons,
@@ -733,7 +799,11 @@ def write_params(cohort: Cohort, out_dir: Path) -> None:
                              'max_evalue': lv.max_evalue,
                              'min_fident': lv.min_fident}
                    for lv in cohort.levels},
-        'selection': {'max_family_pct': cohort.max_family_pct},
+        'selection': {'max_family_pct': cohort.max_family_pct,
+                      'k_folds': cohort.k_folds,
+                      'max_fold_fraction': cohort.max_fold_fraction},
+        'locus_overlap': {'enabled': cohort.locus_overlap_enabled,
+                          'min_overlap_bp': cohort.min_overlap_bp},
         'translate': {'min_protein_len': cohort.min_protein_len,
                       'max_internal_stop_frac': cohort.max_internal_stop_frac},
         'tool_versions': {

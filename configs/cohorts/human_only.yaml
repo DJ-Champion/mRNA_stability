@@ -29,18 +29,45 @@ levels:
   loose:  { min_nbs: 0.25, min_cov: 0.50, max_evalue: 1.0e-3,  min_fident: 0.20 }
 
 # The ceiling is derived from k, because the real constraint is that a family
-# must pack into a fold: a family may take at most max_fold_fraction of one
-# fold, and a fold is 1/k of the corpus. At k=5 that gives 0.25/5 = 5%.
+# must pack into a split: a family may take at most max_fold_fraction of one
+# split, and a split is 1/k of the corpus.
 #
-# Treat it as a heuristic, not a boundary. Measured on human MANE (13,600
-# genes): strict fragments the C2H2 zinc fingers into pieces of <= 23, which
-# is under-merging; loose assembles them into one coherent 364-member family
-# (2.7%, ~13% of a fold at k=5) and merges the Ras superfamily at superfamily
-# rather than family level. `loose` is the right blocking level here.
+# k_folds: 10 for an 80-10-10 holdout — the binding constraint is the SMALLEST
+# split (10%), not the number of folds. That gives a 2.5% ceiling.
+#
+# CHOSEN LEVEL: medium. Measured on human MANE (13,601 genes), cross-family
+# nucleotide identity at >=80% — the band where similarity is real leakage:
+#
+#     region   loose    medium   strict
+#     CDS      2 genes  5 genes  (strict fragments the C2H2 zinc fingers
+#     3'UTR    0.397%   0.412%    into pieces of <=23 and is not usable)
+#     5'UTR    0.169%   0.243%
+#
+# loose and medium differ by 3 genes in CDS at >=80% identity. The larger gap
+# in weaker bands (2 vs 67 genes counting ANY detectable match) is distant
+# paralogues whose nucleotide sequences have diverged — detectable as protein,
+# not as DNA — so it is not leakage. medium also yields more clusters (10,605
+# vs 9,126), which marginally helps cluster-robust standard errors.
+#
+# family.tsv carries every level as a column, so refitting at `loose` as a
+# sensitivity check costs one extra model fit.
 selection:
-  k_folds: 5
+  k_folds: 10
   max_fold_fraction: 0.25
   # max_family_pct: 0.05     # explicit override, bypasses the k derivation
+
+# Genes whose exons overlap share DNA, so their region features are related
+# regardless of homology — an axis protein clustering cannot see. Found via the
+# nucleotide audit as pairs at 100% identity with no protein relationship.
+#
+# Measured on human MANE: 427 pairs, 92% of them antisense (convergent genes
+# whose 3' ends run into each other). Overlap lengths run min 100 / median 531
+# / p95 2841 / max 5899 bp, so the 100 bp floor is not scraping up noise —
+# only 19% of pairs fall below 200 bp. Adding these edges cut cross-family
+# 3'UTR identity at >=90% by 10x (142 genes -> 14).
+locus_overlap:
+  enabled: true
+  min_overlap_bp: 100
 
 translate:
   min_protein_len: 30

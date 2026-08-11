@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
+from lib.gff import normalise_id
+
 # Protein IDs are '<species>|<gene_id>|<transcript_id>'. Pipe is forbidden
 # inside any component so the split is unambiguous.
 ID_SEP = '|'
@@ -274,6 +276,103 @@ def canonical_families(uf: UnionFind, ids: Sequence[str],
 # ---------------------------------------------------------------------------
 # Search identity
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Locus overlap
+# ---------------------------------------------------------------------------
+
+_GENE_ID_RE = re.compile(r'(?:^|;)gene_id=([^;]+)')
+
+
+def gene_exons_from_gff(path: Path) -> dict[str, tuple[str, str, list[tuple[int, int]]]]:
+    """Merged exon intervals per gene: gene_id -> (chrom, strand, [(start, end)]).
+
+    Two notes on why it is written this way.
+
+    `canonical.gff` is produced by bin/01_extract.py write_filtered_gff, which
+    keeps only lines linked to a retained transcript. Gene-level features have
+    no such link, so the file contains NO `gene` rows — spans must come from
+    the `gene_id` attribute on child features.
+
+    Exons, not the gene span. Two genes nested one inside the other's intron
+    share no transcribed sequence, so their extracted regions are independent
+    and they must not be linked. Only exonic overlap means shared sequence.
+    """
+    raw: dict[str, tuple[str, str, list[list[int]]]] = {}
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith('#'):
+                continue
+            f = line.rstrip('\n').split('\t')
+            if len(f) < 9 or f[2] != 'exon':
+                continue
+            m = _GENE_ID_RE.search(f[8])
+            if not m:
+                continue
+            gid = normalise_id(m.group(1))
+            entry = raw.get(gid)
+            if entry is None:
+                raw[gid] = (f[0], f[6], [[int(f[3]), int(f[4])]])
+            else:
+                entry[2].append([int(f[3]), int(f[4])])
+
+    out: dict[str, tuple[str, str, list[tuple[int, int]]]] = {}
+    for gid, (chrom, strand, ivs) in raw.items():
+        ivs.sort()
+        merged: list[list[int]] = []
+        for s, e in ivs:
+            if merged and s <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        out[gid] = (chrom, strand, [(s, e) for s, e in merged])
+    return out
+
+
+def find_overlapping_gene_pairs(
+    gene_exons: dict[str, tuple[str, str, list[tuple[int, int]]]],
+    min_overlap_bp: int = 100,
+) -> list[tuple[str, str, str, int, str, str]]:
+    """Gene pairs sharing at least `min_overlap_bp` of exonic sequence.
+
+    Returns (gene_a, gene_b, chrom, overlap_bp, strand_a, strand_b) with
+    gene_a < gene_b, sorted by descending overlap.
+
+    Both strands count. An antisense overlap still means the two genes are
+    transcribed from the same DNA, so their extracted regions are reverse
+    complements — identical length and GC by construction, and correlated
+    structure. That is non-independence regardless of orientation.
+    """
+    by_chrom: dict[str, list[tuple[int, int, str]]] = {}
+    for gid, (chrom, _strand, ivs) in gene_exons.items():
+        by_chrom.setdefault(chrom, []).extend((s, e, gid) for s, e in ivs)
+
+    pair_bp: dict[tuple[str, str], int] = {}
+    for ivs in by_chrom.values():
+        ivs.sort()
+        active: list[tuple[int, int, str]] = []      # (end, start, gene)
+        for s, e, gid in ivs:
+            if active:
+                active = [a for a in active if a[0] > s]
+            for ae, a_s, ag in active:
+                if ag == gid:
+                    continue
+                ov = min(e, ae) - max(s, a_s)
+                if ov > 0:
+                    key = (ag, gid) if ag < gid else (gid, ag)
+                    pair_bp[key] = pair_bp.get(key, 0) + ov
+            active.append((e, s, gid))
+
+    out = []
+    for (ga, gb), bp in pair_bp.items():
+        if bp < min_overlap_bp:
+            continue
+        chrom, sa, _ = gene_exons[ga]
+        _, sb, _ = gene_exons[gb]
+        out.append((ga, gb, chrom, bp, sa, sb))
+    out.sort(key=lambda r: -r[3])
+    return out
+
 
 def search_hash(search: SearchParams, members: Iterable[tuple[str, str, int]]) -> str:
     """Short stable hash of everything that invalidates the alignment table.

@@ -17,6 +17,8 @@ Designed family structure:
     L1, L2       Cys/Gly/Ser-rich near-identical -> one family
     T1           20 aa, below min_protein_len    -> unsearched singleton,
                                                     still present in family.tsv
+    O1, O2       unrelated proteins, exons overlap in the GFF -> one family
+    N1, N2       unrelated proteins, N2 nested in N1's INTRON -> two families
 
 Two load-bearing cases, both guarding silent under-merging:
 
@@ -34,6 +36,12 @@ paralogues hit at e-values ~1e-71 while it had no self-hit).
 T1 — too short to search, but it must still appear in family.tsv. Dropping it
 would put an unexplained NA in the blocking table on a left_join from
 manifest.tsv, breaking the gene-universe guarantee the design rests on.
+
+O1/O2 and N1/N2 — the locus-overlap edge source, which links genes transcribed
+from the same DNA regardless of homology. O1/O2 share exonic sequence and must
+merge. N1/N2 overlap only in gene SPAN (N2 sits inside N1's intron), share no
+transcribed sequence, and must NOT merge — that pair guards the decision to
+compare exons rather than gene spans.
 """
 from __future__ import annotations
 
@@ -78,7 +86,14 @@ def back_translate(protein: str) -> str:
 
 
 def build_fixture(runs_root: Path) -> None:
-    """Write extracted_CDS.fa for the `human_test` dataset under runs_root."""
+    """Write extracted_CDS.fa (and extracted_3UTR.fa) for `human_test`.
+
+    The 3'UTRs are independent random sequence, EXCEPT S1/S2 which are ~92%
+    identical. S1 and S2 are singletons in different protein families, so that
+    pair is cross-family nucleotide similarity — invisible to protein-based
+    blocking, and the case tests/run_audit_check.py exists to detect. 01c
+    ignores this file; only the audit reads it.
+    """
     rng = random.Random(20260804)
 
     def cds(n):
@@ -108,6 +123,8 @@ def build_fixture(runs_root: Path) -> None:
         'X1': seq(x1),
         'L1': back_translate(lc1), 'L2': back_translate(lc2),
         'T1': seq(cds(20)),                  # 21 aa, under min_protein_len 30
+        'O1': seq(cds(N_CODONS)), 'O2': seq(cds(N_CODONS)),   # exons overlap
+        'N1': seq(cds(N_CODONS)), 'N2': seq(cds(N_CODONS)),   # nested, no overlap
     }
 
     out = runs_root / 'human_test' / 'extracted_regions'
@@ -115,6 +132,46 @@ def build_fixture(runs_root: Path) -> None:
     with open(out / 'extracted_CDS.fa', 'w') as fh:
         for name, s in records.items():
             fh.write(f">GENE{name}_TX{name}.1_CDS\n{s}\n")
+
+    def dna(n):
+        return ''.join(rng.choice('ACGT') for _ in range(n))
+
+    utrs = {name: dna(1100) for name in records}
+    # S1/S2 share a 3'UTR at ~92% identity while their proteins are unrelated.
+    s2 = list(utrs['S1'])
+    for i in rng.sample(range(len(s2)), int(len(s2) * 0.08)):
+        s2[i] = rng.choice('ACGT')
+    utrs['S2'] = ''.join(s2)
+
+    with open(out / 'extracted_3UTR.fa', 'w') as fh:
+        for name, s in utrs.items():
+            fh.write(f">GENE{name}_TX{name}.1_3UTR\n{s}\n")
+
+    # canonical.gff for the locus-overlap edge source. Only the four genes that
+    # exercise it need coordinates; genes absent from the GFF simply contribute
+    # no overlap edges. Mirrors the real file in carrying no `gene` features —
+    # write_filtered_gff drops them — so spans come from gene_id on exon rows.
+    #
+    #   O1 exon 1000-2000 (+) and O2 exon 1500-2500 (-) share 501 bp.
+    #   N1 exons 10000-10500 / 20000-20500 (+); N2 exon 15000-15500 (-) lies in
+    #   N1's intron, so their SPANS overlap but no transcribed sequence does.
+    exons = [
+        ('O1', '+', [(1000, 2000)]),
+        ('O2', '-', [(1500, 2500)]),
+        ('N1', '+', [(10000, 10500), (20000, 20500)]),
+        ('N2', '-', [(15000, 15500)]),
+    ]
+    with open(out / 'canonical.gff', 'w') as fh:
+        fh.write("##gff-version 3\n")
+        for name, strand, ivs in exons:
+            attrs = (f"Parent=TX{name}.1;gene_id=GENE{name};"
+                     f"transcript_id=TX{name}.1")
+            lo, hi = min(s for s, _ in ivs), max(e for _, e in ivs)
+            fh.write(f"chrT\ttest\ttranscript\t{lo}\t{hi}\t.\t{strand}\t.\t"
+                     f"ID=TX{name}.1;{attrs}\n")
+            for i, (s, e) in enumerate(ivs, 1):
+                fh.write(f"chrT\ttest\texon\t{s}\t{e}\t.\t{strand}\t.\t"
+                         f"ID=exon:TX{name}.1:{i};{attrs}\n")
 
 
 def find_family_tsv(runs_root: Path) -> Path:
@@ -133,7 +190,7 @@ def check(rows: list[dict], failures: list[str]) -> None:
         if not cond:
             failures.append(label)
 
-    expect("all 12 genes present", len(rows) == 12)
+    expect("all 16 genes present", len(rows) == 16)
     expect("no missing family assignment",
            all(r.get('family_id_medium') for r in rows))
 
@@ -147,7 +204,7 @@ def check(rows: list[dict], failures: list[str]) -> None:
         expect("too-short protein has a real family id",
                bool(by_gene['GENET1']['family_id_medium']))
     expect("every other protein is marked searched",
-           sum(1 for r in rows if r['searched'] == 'true') == 11)
+           sum(1 for r in rows if r['searched'] == 'true') == 15)
 
     fam = {g: by_gene[g]['family_id_medium'] for g in by_gene}
     a_members = {'GENEA1', 'GENEA2', 'GENEA3', 'GENEX1'}
@@ -168,6 +225,19 @@ def check(rows: list[dict], failures: list[str]) -> None:
            by_gene['GENEX1']['protein_len'] == by_gene['GENEA1']['protein_len'])
     expect("only X1 has an internal stop",
            sum(1 for r in rows if r['had_internal_stop'] == 'true') == 1)
+
+    # Locus overlap: shared exonic sequence merges, nested-in-intron does not.
+    expect("exon-overlapping O1/O2 merged into one family",
+           fam['GENEO1'] == fam['GENEO2'])
+    expect("O1/O2 family has exactly two members",
+           by_gene['GENEO1']['family_size_medium'] == '2')
+    expect("intron-nested N1/N2 NOT merged (span overlap is not enough)",
+           fam['GENEN1'] != fam['GENEN2'])
+    expect("N1 remains a singleton",
+           by_gene['GENEN1']['family_size_medium'] == '1')
+    expect("locus overlap applies at every level",
+           by_gene['GENEO1']['family_id_strict'] == by_gene['GENEO2']['family_id_strict']
+           and by_gene['GENEO1']['family_id_loose'] == by_gene['GENEO2']['family_id_loose'])
 
     # The --mask 0 rescue guard: tantan removes this pair from the main search
     # entirely, so without the rescue pass they are two singletons.
