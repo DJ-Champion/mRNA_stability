@@ -633,6 +633,11 @@ cohorts), matching the conventions in `METRICS.md`.
 
 ### 2.2 Outer folds — Blocked Group K-Fold
 
+> **This project uses an 80-10-10 holdout, not k-fold.** Read 2.2a first; the
+> packer below is the general case that 2.2a specialises. The *blocking*
+> requirement is identical either way — a family must never span two splits —
+> so everything about `family.tsv` is unchanged.
+
 The requirement is that every family lands entirely in one fold. The
 complication is that family sizes are wildly unequal — one family of 400
 alongside 15,000 singletons — so assigning families to folds at random gives
@@ -675,7 +680,79 @@ fam   <- merge(fam, folds, by = "family_id", all.x = TRUE)
 order the table happened to arrive in, and every seed produces the same
 partition.
 
+### 2.2a The 80-10-10 holdout used by this project
+
+Two changes from 2.2, both small.
+
+**Unequal bins.** The packer above assigns each family to the *emptiest* bin,
+which is only correct when bins are the same size. For unequal targets, assign
+to whichever bin is furthest below its quota: `which.max(target - load)`
+instead of `which.min(load)`. That is the whole generalisation.
+
+**Large families are pinned to training by design.** With 13,601 genes, a 10%
+test split is ~1,360 genes, and blocking keeps families intact — so the
+largest family (282 members at `medium`) would be ~21% of the test set
+wherever it landed. A single holdout gives one draw and no error bar, so
+rather than hope, the biggest families go to training deliberately.
+
+State the criterion rather than eyeballing it. "Any family larger than 5% of
+the smallest split" is reproducible and defensible; "the top few" is not. The
+consequence must be reported: the test set is depleted of large families, so
+its performance is not an unbiased estimate for a randomly chosen gene.
+
+```r
+#' Assign families to named splits with unequal targets, pinning large
+#' families to the first split. Returns data.table(family_id, split).
+assign_holdout <- function(fam,
+                           props = c(train = 0.8, val = 0.1, test = 0.1),
+                           pin_frac = 0.05, seed = 1L) {
+  sizes <- fam[, .(n = .N), by = family_id]
+  n_tot <- sum(sizes$n)
+
+  # Families too large to sit in the smallest split without dominating it.
+  pin_above <- pin_frac * min(props) * n_tot
+  pinned <- sizes[n >  pin_above]
+  rest   <- sizes[n <= pin_above]
+
+  target <- props * n_tot
+  load   <- setNames(numeric(length(props)), names(props))
+  load[1] <- sum(pinned$n)                 # pinned genes already in split 1
+
+  set.seed(seed)
+  rest <- rest[sample(.N)][order(-n)]      # randomise, then LPT
+  out  <- character(nrow(rest))
+  for (i in seq_len(nrow(rest))) {
+    j       <- which.max(target - load)    # furthest below quota, not emptiest
+    out[i]  <- names(load)[j]
+    load[j] <- load[j] + rest$n[i]
+  }
+
+  rbind(data.table(family_id = pinned$family_id, split = names(props)[1]),
+        data.table(family_id = rest$family_id,   split = out))
+}
+
+splits <- assign_holdout(fam, seed = 42L)
+fam    <- merge(fam, splits, by = "family_id", all.x = TRUE)
+```
+
+**Write the split to disk and read it back everywhere.** Generate it once,
+save `gene_id → split`, and have every downstream script consume that file.
+Regenerating it inside the modelling code means a rebuilt `family.tsv`, a
+different R version, or even a changed row order can silently reshuffle which
+genes are in test — results stop being reproducible with nothing looking
+wrong. Record the `<search_hash>` of the family run alongside it so the split
+is traceable to the clustering that produced it.
+
+The assertions in 2.4 apply unchanged, substituting `split` for `fold`.
+
+**2.3 does not apply.** A three-way split already separates model selection
+(`val`) from the final estimate (`test`), which is what the nested inner loop
+existed to provide.
+
 ### 2.3 Inner folds — nested, and drawn only from outer-train
+
+> Not used by this project — the `val` split of 2.2a already serves this
+> purpose. Retained for a k-fold design.
 
 The inner split must respect the same family blocks, and must be built from
 the outer training set alone. Re-running the same packer on the retained
@@ -724,13 +801,50 @@ construction, which is correct for the leakage guarantee but can skew that
 fold's target distribution. Worth seeing before it surprises you in the
 results.
 
-### 2.5 What the CV design tests
+### 2.5 What the design tests
 
 Random-over-families with all orthologues held together tests **generalisation
 to novel gene families**. Report it as such. It is a different and stronger
 claim than random-over-genes, and a different claim from leave-one-species-out
 (which would test cross-species transfer). Stating which one is being measured
 in the write-up avoids the usual ambiguity.
+
+Note that pinning the largest families to training (2.2a) weakens this
+slightly: the test set is depleted of large families, so it measures
+generalisation to *small and singleton* families rather than to all of them.
+That is a reasonable trade for a representative test set on a single draw,
+but it should be stated rather than left implicit.
+
+### 2.6 If the goal is inference rather than prediction
+
+For a question of the form "does secondary structure affect half-life?" the
+family label's main job is **not** defining the split. It is the **clustering
+unit for uncertainty estimates**.
+
+A 282-member family is not 282 independent observations — its members share
+ancestry, regulation and sequence. Fit a model treating them as independent
+and the confidence interval on the structure coefficient comes out too narrow,
+so a null result cannot be trusted either. Family should therefore enter the
+model as a random effect, or as the cluster for cluster-robust standard
+errors. The held-out split then answers the separate, secondary question of
+whether the relationship predicts out of sample.
+
+Two things follow:
+
+* **Fit on the training portion and report the coefficient with clustered
+  uncertainty.** With ~10,900 genes and ~8,500 clusters in `train`, there is
+  ample power; the 10% test split is for the predictive check, not the effect
+  estimate.
+* **Use the shuffle-based z-scores, not raw MFE.** Raw MFE is strongly
+  confounded with length and GC — longer sequences fold to more negative MFE
+  almost mechanically — so a naive regression will recover a length effect and
+  call it structure. The pipeline already folds 1,000 dinucleotide-preserving
+  shuffles per sequence for exactly this reason. It is the single most
+  important control for the central claim.
+
+Since every level is a column in `family.tsv`, refitting with
+`family_id_loose` is a one-line sensitivity check, and "conclusions were
+unchanged under a looser grouping" is worth more than the level choice itself.
 
 ---
 
