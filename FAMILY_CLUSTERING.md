@@ -169,7 +169,7 @@ Then, per record:
 
 `n_internal_stop` above a percent or so means the wrong `transl_table`, a frame
 problem upstream, or a genuinely poor annotation. Fail loudly above 5%.
-(Human MANE measures 19/13,600 = 0.14%.)
+(Human MANE measures 19/13,601 = 0.14%.)
 
 seqkit is doing real work here — it handles ambiguous codons properly
 (`ACN`→`T`, `MGR`→`R`, etc.) rather than emitting `X`. Keep it; just don't let
@@ -368,9 +368,17 @@ from the same DNA, so their extracted regions share sequence — and the genes
 need not be homologous at all, which is precisely why protein clustering
 cannot see it.
 
-Found empirically via the audit in 1.8: ~67 human gene pairs (~134 genes of
-13,601) with 100% 3'UTR identity, mostly **antisense**, all confirmed as
-overlapping annotations. One pair shared 3,197 nt.
+Found empirically via the audit in 1.8: ~67 human gene pairs showing 100%
+3'UTR identity with no protein relationship, mostly **antisense**, all
+confirmed as overlapping annotations. One pair shared 3,197 nt.
+
+Detecting them from annotation coordinates rather than sequence identity
+catches more — **427 pairs** on human MANE, 92% antisense — because the audit
+only sees pairs whose shared segment dominates ≥50% of *both* regions, while a
+coordinate overlap of any size counts. Overlap lengths run median 531 / p95
+2841 / max 5899 bp, with only 19% below 200 bp, so the 100 bp floor is not
+scraping up noise. Adding these edges cut cross-family 3'UTR identity at ≥90%
+by 10× (142 genes → 14) at an unchanged blocking level.
 
 ```yaml
 locus_overlap:
@@ -445,36 +453,56 @@ real singleton family ID rather than being omitted.
 **Selection rule: take the loosest level whose `max_family_pct` stays under a
 ceiling derived from k.** Loosest, because over-merging costs power while
 under-merging inflates the estimate. The ceiling exists because a family must
-pack into a fold: it may occupy at most `max_fold_fraction` (default 0.25) of
-one fold, and a fold is `1/k` of the corpus. At k=5 that is 5%; at k=10, 2.5%.
+pack into a split: it may occupy at most `max_fold_fraction` (default 0.25) of
+one split, and a split is `1/k` of the corpus. At k=5 that is 5%; at k=10, 2.5%.
+
+For a holdout design, `k_folds` is set from the **smallest** split, not the
+number of folds — an 80-10-10 split takes `k_folds: 10`.
 
 Deriving it from k rather than fixing it matters — a fixed percentage silently
 becomes wrong when k changes, and it is a packing heuristic rather than a hard
 boundary. A level that misses narrowly while its largest family still sits
-well inside one fold is usually the better choice, so the run warns rather
+well inside one split is often the better choice, so the run warns rather
 than silently falling through to a much stricter level.
 
-**Measured on human MANE (13,600 genes, k=5):**
+**Measured on human MANE (13,601 genes, k=10, with locus-overlap edges):**
 
 | level | families | singletons | max family | max % |
 |---|---|---|---|---|
-| loose | 9,546 | 7,453 (54.8%) | 364 | 2.68% |
-| medium | 11,027 | 9,459 (69.6%) | 278 | 2.04% |
-| strict | 12,584 | 11,837 (87.0%) | 23 | 0.17% |
+| loose | 9,126 | 6,893 (50.7%) | 368 | 2.71% |
+| **medium** | **10,605** | 8,797 (64.7%) | 282 | **2.07%** |
+| strict | 12,158 | 11,074 (81.4%) | 24 | 0.18% |
 
-`loose` is the right blocking level. Its largest family is the C2H2 zinc
-fingers (364 members, coherent — `ZNF195, ZNF263, ZNF175, ZNF37A, …`), which
-is 13% of a fold at k=5 and packs without trouble. Its second largest is the
-Ras superfamily (94), which `medium` splits along known subfamily lines into
-RAB (27), RHO (17) and RAS (14) — so `loose` merges at superfamily level and
-`medium` at family level.
+**`medium` is the chosen blocking level.** The size distribution is only half
+the argument; the audit in 1.8 supplies the other half. Cross-family
+nucleotide identity at ≥80% — the band where similarity is genuine leakage:
 
-`strict` is unusable despite the reassuring 0.17%: its top three families are
+| region | loose | medium |
+|---|---|---|
+| CDS | 2 genes | 5 genes |
+| 3'UTR | 0.397% | 0.412% |
+| 5'UTR | 0.169% | 0.243% |
+
+Three genes separate them in CDS. Counting *any* detectable match instead
+gives 2 versus 67, but that gap is distant paralogues whose nucleotide
+sequences have diverged past recognition while their proteins remain
+alignable — detectable as protein, not as DNA, and therefore not leakage.
+Reading the "any hit" column as if it measured leakage overstates the case for
+`loose`; the identity-resolved numbers are the ones to use.
+
+`medium` also yields more clusters (10,605 vs 9,126), which marginally helps
+cluster-robust standard errors, and it splits the Ras superfamily along known
+subfamily lines — RAB (27), RHO (17), RAS (14) — where `loose` merges the
+whole superfamily (94). Both are defensible; since `family.tsv` carries every
+level as a column, refitting at `loose` is a one-line sensitivity check.
+
+`strict` is unusable despite the reassuring 0.18%: its top three families are
 *all* ZNF fragments (23, 15, 10), meaning it shreds the largest real gene
-family in the genome. 87% singletons is the tell. A small `max_family_pct` is
-not evidence of a good level — always confirm against `family_members.tsv`.
+family in the genome. 81% singletons is the tell. A small `max_family_pct` is
+not evidence of a good level — always confirm against `family_members.tsv`
+and the audit.
 
-An earlier fixed 2% ceiling picked `strict` here, because `medium` at 2.044%
+An earlier fixed 2% ceiling picked `strict` here, because `medium` at 2.04%
 missed by six genes and the rule fell straight through. That knife-edge is
 what motivated both the k derivation and the near-miss warning.
 
@@ -502,8 +530,8 @@ composition) carry much of the signal in a stability model. `bin/01d_family_audi
 measures that residual:
 
 ```bash
-./bin/01d_family_audit.py --cohort human_only --level loose
-./bin/01d_family_audit.py -c human_only -l loose --regions 3UTR,5UTR,CDS
+./bin/01d_family_audit.py --cohort human_only --level medium
+./bin/01d_family_audit.py -c human_only -l medium --regions 3UTR,5UTR,CDS
 ```
 
 For every gene and region it finds the most similar gene in a **different**
@@ -537,6 +565,15 @@ column is derived.
 at real coverage, protein-based blocking is sufficient and the CDS-only basis
 is defensible — with a figure rather than an assumption. If there is a tail,
 `audit_pairs.tsv` names the responsible pairs.
+
+**Use the identity-banded columns, not `n_with_cross_family_hit`.** The "any
+hit" count includes weak matches that are not leakage, and comparing levels on
+it is misleading. On human MANE, CDS "any hit" gives 2 genes at `loose` versus
+67 at `medium` — a 33× gap that looks decisive — while at ≥80% identity the
+same comparison is 2 versus 5. The difference is distant paralogues whose
+nucleotide sequences have diverged past recognition but whose proteins remain
+alignable: detectable, but not similar enough to leak. `pct_ge_80` and
+`pct_ge_90` are the decision variables.
 
 Shared-repeat matches (an Alu in two unrelated 3'UTRs) are largely excluded by
 `--min-cov` (default 0.5, both query and target): 300 bp of Alu inside a 2 kb
@@ -580,7 +617,9 @@ library(data.table)
 fam <- fread("runs/_cohorts/<cohort>/family/<hash>/family.tsv",
              na.strings = "NA")
 
-BLOCK_LEVEL <- "loose"    # measured choice for human MANE; see 1.7
+BLOCK_LEVEL <- "medium"   # measured choice for human MANE; see 1.7.
+                          # Refit with "loose" as a sensitivity check —
+                          # every level is already a column.
 fam[, family_id := get(paste0("family_id_", BLOCK_LEVEL))]
 
 stopifnot(

@@ -63,8 +63,9 @@ levels:
 # better choice, since under-merging is the unsafe error. The run warns when
 # a level lands just over.
 selection:
-  k_folds: 5                 # the k you will use downstream
-  max_fold_fraction: 0.25    # largest family as a share of one fold
+  k_folds: 5                 # k-fold: the k. Holdout: set from the SMALLEST
+                             # split, so an 80-10-10 design takes 10.
+  max_fold_fraction: 0.25    # largest family as a share of one split
   # max_family_pct: 0.05     # explicit override, bypasses the k derivation
 
 # Third edge source, alongside the protein search. Genes whose EXONS overlap
@@ -79,7 +80,9 @@ selection:
 # Antisense overlaps count too. A reverse-complement shared region still gives
 # the pair identical length and GC by construction.
 #
-# Measured on human MANE: ~67 gene pairs, ~134 genes out of 13,601.
+# Measured on human MANE: 427 gene pairs, 92% antisense. Overlap lengths run
+# median 531 / p95 2841 / max 5899 bp, so a 100 bp floor is not scraping up
+# noise — only 19% of pairs fall below 200 bp.
 locus_overlap:
   enabled: true
   min_overlap_bp: 100      # ignore incidental few-base overlaps

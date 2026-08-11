@@ -106,7 +106,7 @@ Families are built from protein similarity, which captures CDS relatedness but
 says nothing directly about UTRs — where much of the stability signal lives.
 `01d_family_audit.py` measures that residual:
 
-    ./bin/01d_family_audit.py --cohort human_only --level loose
+    ./bin/01d_family_audit.py --cohort human_only --level medium
 
 For each gene and region it finds the most similar gene in a *different*
 family: the pairs that can land on opposite sides of a split. Split-agnostic,
