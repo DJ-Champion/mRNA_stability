@@ -7,24 +7,26 @@ Output (<metrics_dir>/junctions.tsv) columns:
     gene_id                         joinable across metrics
     strand
     n_exons
-    n_5UTR_junctions                len(five_prime_UTR features) - 1
-    n_CDS_junctions                 len(CDS features) - 1
-    n_3UTR_junctions                len(three_prime_UTR features) - 1
+    n_mRNA_junctions                exon junctions in the full mature mRNA
+    n_5UTR_junctions                exon junctions wholly within the 5' UTR
+    n_CDS_junctions                 exon junctions wholly within the CDS
+    n_3UTR_junctions                exon junctions wholly within the 3' UTR
     stop_dist_closest_upstream      spliced nt; NA if no upstream junction
-    stop_dist_closest_downstream    spliced nt; NA if stop in last exon
-    stop_dist_last_downstream       spliced nt; canonical NMD metric
+    stop_dist_closest_downstream    intervening spliced nt; NA if no junction
+    stop_dist_last_downstream       intervening spliced nt; canonical NMD metric
     start_dist_closest_upstream     spliced nt
     start_dist_closest_downstream   spliced nt
 
 Notes
 -----
-* Region junction counts assume per-exon UTR/CDS features (MANE, GENCODE,
-  modern Ensembl). Annotations that collapse UTRs into a single feature
-  per region will report 0 UTR junctions even when the UTR spans multiple
-  exons.
+* Region junction counts are derived from the actual exon boundaries. A
+  junction is assigned to a region only when that region contains the
+  nucleotide immediately before and immediately after the junction.
 * Reference points: first nt of start codon, last nt of stop codon — both
   in transcript reading direction. Falls back to CDS extent if explicit
   start_codon / stop_codon features are absent.
+* Downstream stop distances count only intervening nucleotides: a junction
+  immediately after the stop codon has distance 0.
 * Single-exon transcripts: all junction columns are 0 / NA.
 * Stop or start codons split across an intron: handled by collapsing the
   feature pieces to the appropriate transcript-direction extreme.
@@ -56,6 +58,7 @@ _NA = 'NA'
 
 _HEADER = [
     'transcript_id', 'gene_id', 'strand', 'n_exons',
+    'n_mRNA_junctions',
     'n_5UTR_junctions', 'n_CDS_junctions', 'n_3UTR_junctions',
     'stop_dist_closest_upstream', 'stop_dist_closest_downstream',
     'stop_dist_last_downstream',
@@ -178,6 +181,48 @@ def _genomic_to_spliced(genomic_pos: int, spliced_index, strand: str) -> Optiona
     return None
 
 
+def _feature_spliced_intervals(features, spliced_index, strand: str):
+    """Return inclusive spliced-coordinate intervals covered by features.
+
+    Each feature is intersected with every exon rather than assuming one
+    annotation record per participating exon. This supports both the usual
+    MANE per-exon UTR/CDS records and annotations that use a feature spanning
+    more than one exon.
+    """
+    intervals = []
+    for feature in features:
+        for g_start, g_end, spliced_start, _ in spliced_index:
+            overlap_start = max(feature.start, g_start)
+            overlap_end = min(feature.end, g_end)
+            if overlap_start > overlap_end:
+                continue
+
+            if strand == '-':
+                interval_start = spliced_start + (g_end - overlap_end)
+                interval_end = spliced_start + (g_end - overlap_start)
+            else:
+                interval_start = spliced_start + (overlap_start - g_start)
+                interval_end = spliced_start + (overlap_end - g_start)
+            intervals.append((interval_start, interval_end))
+    return intervals
+
+
+def _count_region_junctions(junctions, features, spliced_index, strand: str) -> int:
+    """Count actual exon junctions wholly contained within a region.
+
+    Junction ``j`` separates mature-mRNA positions ``j - 1`` and ``j``.
+    It belongs to a region only when both flanking nucleotides are covered by
+    that region. A junction coincident with a region boundary is therefore not
+    assigned to either adjacent region.
+    """
+    intervals = _feature_spliced_intervals(features, spliced_index, strand)
+
+    def is_covered(pos: int) -> bool:
+        return any(start <= pos <= end for start, end in intervals)
+
+    return sum(is_covered(j - 1) and is_covered(j) for j in junctions)
+
+
 # ---------------------------------------------------------------------------
 # Reference-point extraction
 # ---------------------------------------------------------------------------
@@ -234,13 +279,18 @@ def _compute_for_transcript(db, transcript, manifest_tx_id: str) -> Optional[dic
     spliced_index, junctions = _build_spliced_index(exons, strand)
     n_exons = len(exons)
 
-    # Region junction counts (assumes per-exon UTR/CDS features)
+    # Full-mRNA and regional counts from actual exon junction coordinates.
+    # A regional junction must have region sequence on both sides.
     utr5 = list(db.children(transcript, featuretype='five_prime_UTR'))
     cds = list(db.children(transcript, featuretype='CDS'))
     utr3 = list(db.children(transcript, featuretype='three_prime_UTR'))
-    n_5utr_j = max(0, len(utr5) - 1)
-    n_cds_j = max(0, len(cds) - 1)
-    n_3utr_j = max(0, len(utr3) - 1)
+    n_mrna_j = len(junctions)
+    n_5utr_j = _count_region_junctions(
+        junctions, utr5, spliced_index, strand)
+    n_cds_j = _count_region_junctions(
+        junctions, cds, spliced_index, strand)
+    n_3utr_j = _count_region_junctions(
+        junctions, utr3, spliced_index, strand)
 
     # Reference points → spliced
     start_codons = list(db.children(transcript, featuretype='start_codon'))
@@ -254,7 +304,8 @@ def _compute_for_transcript(db, transcript, manifest_tx_id: str) -> Optional[dic
     stop_s = (_genomic_to_spliced(stop_g, spliced_index, strand)
               if stop_g is not None else None)
 
-    stop_up, stop_down, stop_last_down = _distances(stop_s, junctions)
+    stop_up, stop_down, stop_last_down = _distances(
+        stop_s, junctions, downstream_intervening_nt=True)
     start_up, start_down, _ = _distances(start_s, junctions)
 
     # gene_id from attributes; fall back to Parent or empty
@@ -269,6 +320,7 @@ def _compute_for_transcript(db, transcript, manifest_tx_id: str) -> Optional[dic
         'gene_id': gene_id,
         'strand': strand,
         'n_exons': n_exons,
+        'n_mRNA_junctions': n_mrna_j,
         'n_5UTR_junctions': n_5utr_j,
         'n_CDS_junctions': n_cds_j,
         'n_3UTR_junctions': n_3utr_j,
@@ -280,12 +332,16 @@ def _compute_for_transcript(db, transcript, manifest_tx_id: str) -> Optional[dic
     }
 
 
-def _distances(pos: Optional[int], junctions: list[int]):
+def _distances(pos: Optional[int], junctions: list[int],
+               downstream_intervening_nt: bool = False):
     """Return (closest_upstream, closest_downstream, last_downstream).
 
-    All in spliced nt; returned as `pos - junction_pos` (upstream) or
-    `junction_pos - pos` (downstream). None when no qualifying junction
-    exists or `pos` is None.
+    All in spliced nt. Upstream distances are ``pos - junction_pos``.
+    Downstream distances are normally ``junction_pos - pos``; when
+    ``downstream_intervening_nt`` is true, they are instead the number of
+    nucleotides strictly between ``pos`` and the junction:
+    ``junction_pos - pos - 1``. None is returned when no qualifying junction
+    exists or ``pos`` is None.
 
     Convention
     ----------
@@ -293,12 +349,10 @@ def _distances(pos: Optional[int], junctions: list[int]):
     downstream exon* (i.e. junction p separates spliced positions p-1
     and p in the mature mRNA).
 
-    A junction located exactly at `pos` (e.g. start codon coinciding with
-    a splice acceptor) is treated as upstream with distance 0. A junction
-    at `pos+1` (e.g. stop codon at the last nt of an exon) is treated as
-    downstream with distance 1. The asymmetry is intentional: a junction
-    coincident with `pos` lies between `pos-1` and `pos` and is therefore
-    spatially upstream of `pos`.
+    A junction located exactly at ``pos`` (e.g. a start codon coinciding with
+    a splice acceptor) is treated as upstream with distance 0. For stop-codon
+    calculations, a junction at ``pos + 1`` is immediately adjacent to the
+    final stop-codon nucleotide and therefore has downstream distance 0.
     """
     if pos is None or not junctions:
         return None, None, None
@@ -307,8 +361,11 @@ def _distances(pos: Optional[int], junctions: list[int]):
     downstream = [j for j in junctions if j > pos]
 
     closest_up = (pos - max(upstream)) if upstream else None
-    closest_down = (min(downstream) - pos) if downstream else None
-    last_down = (max(downstream) - pos) if downstream else None
+    downstream_offset = 1 if downstream_intervening_nt else 0
+    closest_down = (min(downstream) - pos - downstream_offset
+                    if downstream else None)
+    last_down = (max(downstream) - pos - downstream_offset
+                 if downstream else None)
     return closest_up, closest_down, last_down
 
 
