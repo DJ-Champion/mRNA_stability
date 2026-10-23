@@ -24,6 +24,10 @@
 : "${SLURM_MEM_PER_CPU:=1000MB}"
 : "${SLURM_CPUS_PER_TASK:=1}"
 : "${CONCURRENT_LIMIT:=10}"
+# Aoraki: 5000 submitted jobs per user (each array task counts). Keep headroom.
+: "${MAX_SUBMITTED_JOBS:=4800}"
+# Max wall time of the partition (aoraki = 7 days). Packed tasks must fit.
+: "${MAX_WALL_S:=604800}"
 
 # --- Calibration parameters (tool-agnostic) ---
 : "${SAMPLES_PER_TIER:=3}"
@@ -32,5 +36,5 @@
 
 export TIER_BOUNDS \
        SLURM_JOB_NAME SLURM_PARTITION SLURM_TIME SLURM_MEM_PER_CPU \
-       SLURM_CPUS_PER_TASK CONCURRENT_LIMIT \
+       SLURM_CPUS_PER_TASK CONCURRENT_LIMIT MAX_SUBMITTED_JOBS MAX_WALL_S \
        SAMPLES_PER_TIER SAFETY_FACTOR_TIME SAFETY_FACTOR_MEM
