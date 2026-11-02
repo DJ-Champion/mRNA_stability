@@ -1,0 +1,31 @@
+# configs/datasets/ultrafold_shuffle_set.yaml
+# Ultrafolded transcripts (mRNA z < -30) for the shuffle-distribution plot:
+# the five shortest (GEMIN6, ZNF713, GATD1, VHL, ZNF101) plus TYRO3 (z -50),
+# TRUB2 (-0.149 kcal/mol/nt) and AP1M1 (z -56, 12.9 kb; may need fewer shuffles).
+# Same genome, annotation and isoform rules as human_all, so each gene resolves
+# to the same transcript. Only mRNA is extracted (all rnafold_shuffles needs).
+# After 01_extract, expect 8 rows (one per transcript):
+#   grep -E 'ENST00000(281950.8|429591.4|319863.13|256474.3|592502.2|263798.8|372890.6|291439.8)' \
+#       runs/ultrafold_shuffle_set/extracted_regions/manifest.tsv
+
+inputs:
+  genome_fasta: data/human/GRCh38.primary_assembly.genome.fa
+  annotation_gff: data/human/MANE.GRCh38.v1.5.ensembl_genomic.gff
+  gene_list: data/human/gene_ids_ultrafold_shuffle_set.txt
+
+extraction:
+  min_utr_length: 30
+  filter_short_utrs: false
+  codon_flank_length: 30
+  tail_length: 100
+  output_mode: multifasta
+  isoform_priority:
+    - "appris_principal_1"
+    - "appris_principal_2"
+    - "appris_principal_3"
+    - "Ensembl_canonical"
+    - "MANE_Select"
+  regions_to_extract:
+    - mRNA
+
+species: human
