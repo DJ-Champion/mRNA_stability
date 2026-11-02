@@ -2,14 +2,15 @@
 # configs/tools/rnafold_shuffles.sh
 # RNAfold with a fixed, larger shuffle count, for a hand-picked set of
 # sequences (e.g. the ultrafolded transcripts in the shuffle-distribution
-# figure). Reuses tools/rnafold/worker.sh unchanged; only the output location
-# and the shuffle policy differ:
+# figure). Runs tools/rnafold/worker.sh through tools/rnafold_shuffles/worker.sh,
+# which only clears stale MFE-only results (e.g. left by 03_calibrate.sh) so a
+# real run does not skip them. Output location and shuffle policy differ:
 #
 #   runs/<dataset>/rnafold_shuffles/results/results_<seqname>.csv
 #   runs/<dataset>/rnafold_shuffles/raw_shuffles/<seqname>_raw_shuffles.csv
 #
-# so the original runs/<dataset>/rnafold/ results are left alone (the worker
-# skips any sequence whose results file already exists).
+# so the original runs/<dataset>/rnafold/ results are left alone (the shared
+# worker skips any sequence whose results file already exists).
 #
 # Not tiered: submit with an explicit list, e.g.
 #   N_SHUFFLES=500 SLURM_TIME=08:00:00 ./bin/04_submit.sh -d human_all \
@@ -19,7 +20,7 @@
 # sample; keep the raw_shuffles files from the run you plot.
 
 TOOL_NAME=rnafold_shuffles
-WORKER_SCRIPT="$PROJECT_ROOT/tools/rnafold/worker.sh"
+WORKER_SCRIPT="$PROJECT_ROOT/tools/rnafold_shuffles/worker.sh"
 COLLATE_SCRIPT="$PROJECT_ROOT/tools/rnafold/collate.py"
 
 : "${RNAFOLD_BIN:=/home/chado47p/Software/ViennaRNA/bin/RNAfold}"
