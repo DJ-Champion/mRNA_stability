@@ -9,6 +9,10 @@ two-line CSV (header + row). Columns:
   start_win_start / start_win_end   1-based inclusive window actually used
                                     (clipped to the transcript)
   start_win_len
+  seq_length                        length of the folded mRNA
+  seq_shorter_than_window           1 if seq_length < the RNAplfold window: the
+                                    whole molecule sits in one window, so
+                                    results carry end artefacts; 0 otherwise
   cds_offset                        5'UTR length (nt before the AUG)
   aug_unpaired                      P(the 3 nt of the AUG are all unpaired)
   start_mean_unpaired_u<l>          for each requested l: mean over the window
@@ -88,10 +92,11 @@ def stretch_probs(lunp, l: int, first_end: int, last_end: int) -> list[float]:
 
 
 def summarize(lunp, seq_len: int, cds_offset: int, upstream: int, downstream: int,
-              u_values: list[int]) -> dict[str, object]:
+              u_values: list[int], window: int) -> dict[str, object]:
     s, e = start_window(cds_offset, seq_len, upstream, downstream)
     out: dict[str, object] = {
         'start_win_start': s, 'start_win_end': e, 'start_win_len': e - s + 1,
+        'seq_length': seq_len, 'seq_shorter_than_window': int(seq_len < window),
         'cds_offset': cds_offset,
     }
     aug = lunp.get(cds_offset + 3)
@@ -129,7 +134,7 @@ def main() -> None:
     if not lunp:
         sys.exit(f'ERROR: no rows in {args.lunp}')
     row = summarize(lunp, args.seq_length, five_utr_length(args.manifest, args.seq_name),
-                    args.upstream, args.downstream, u_values)
+                    args.upstream, args.downstream, u_values, args.window)
     row.update(rnaplfold_window=args.window, rnaplfold_span=args.span, rnaplfold_u_max=u_max)
 
     cols = ['seq_name'] + list(row)
