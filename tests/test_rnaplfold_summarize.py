@@ -51,7 +51,7 @@ def test_start_window_and_clipping():
 
 def test_aug_and_stretch_means():
     t = _load()
-    r = S.summarize(t, 12, 4, 2, 2, [1, 3])
+    r = S.summarize(t, 12, 4, 2, 2, [1, 3], 300)
     assert (r['start_win_start'], r['start_win_end'], r['start_win_len']) == (3, 9, 7)
     # AUG = 3 nt ending at 7, l=3 column
     assert _close(r['aug_unpaired'], 0.05 * 7 + 0.003)
@@ -61,9 +61,16 @@ def test_aug_and_stretch_means():
     assert _close(r['start_mean_unpaired_u3'], sum(0.05 * i + 0.003 for i in range(5, 10)) / 5)
 
 
+def test_seq_shorter_than_window_flag():
+    t = _load()
+    assert S.summarize(t, 12, 4, 2, 2, [1], 300)['seq_shorter_than_window'] == 1
+    assert S.summarize(t, 12, 4, 2, 2, [1], 12)['seq_shorter_than_window'] == 0
+    assert S.summarize(t, 12, 4, 2, 2, [1], 12)['seq_length'] == 12
+
+
 def test_window_shorter_than_stretch_is_na():
     t = _load()
-    r = S.summarize(t, 12, 4, 0, 0, [8])   # window = AUG only (3 nt)
+    r = S.summarize(t, 12, 4, 0, 0, [8], 300)   # window = AUG only (3 nt)
     assert r['start_mean_unpaired_u8'] is None
     assert S.fmt(None) == 'NA'
 
