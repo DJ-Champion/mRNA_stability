@@ -225,6 +225,7 @@ The `-d / -t` flags can be replaced with `DATASET=` and `TOOL=` env vars.
       tools/
         rnafold.sh                   # tool config: binaries, per-tier policy, calib hooks
         rnalfold.sh                  # (when added)
+        rnaplfold.sh                 # start-region accessibility (see "RNAplfold" below)
       cohorts/
         example.yaml                 # cohort config template
         <cohort>.yaml                # datasets pooled for family clustering
@@ -267,6 +268,10 @@ The `-d / -t` flags can be replaced with `DATASET=` and `TOOL=` env vars.
       rnalfold/                      # (when added)
         worker.sh
         collate.py
+      rnaplfold/
+        worker.sh                    # RNAplfold on the full mRNA
+        summarize.py                 # slices the _lunp table to the start window
+        collate.py                   # reuses the rnalfold collator
 
     slurm/
       array.sbatch                   # generic launcher
@@ -342,6 +347,43 @@ so post-hoc comparison against `seff` output is straightforward.
 `--verify` runs ONE full-work sample per tier and writes
 `calibration/<ts>/verify.tsv` with predicted-vs-measured divergence. Useful
 after binary upgrades or for new tools.
+
+## RNAplfold: start-region accessibility
+
+`-t rnaplfold` folds the **full mRNA** with `RNAplfold -W 300 -L 150 -u <max>`
+and reports the accessibility (probability of being unpaired) of the start
+region, `[AUG - upstream, AUG + 3 + downstream)`, clipped to the transcript.
+The full transcript is folded, not the extracted `start_codon_region`: a
+fragment has artificial ends, and its accessibilities differ from the
+in-transcript values for ~150 nt from the cut. It runs on `mRNA` only. Method
+reference: <https://michaelwolfinger.com/blog/2026/rnaplfold-accessibility/>.
+
+Settings (optional `tools.rnaplfold` block in the dataset YAML; env overrides
+such as `RNAPLFOLD_WINDOW` win):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `window` | 300 | `-W`, averaging window |
+| `span` | 150 | `-L`, max base-pair span; always passed (`-W` alone silently sets it to the window size) |
+| `u_values` | `[1, 4, 8, 16]` | stretch lengths reported; `-u` is the max of these and 3 |
+| `start_upstream` / `start_downstream` | `extraction.codon_flank_length` (30) | nt either side of the AUG |
+
+Output columns in `combined.tsv` (on top of the manifest columns):
+
+| Column | Meaning |
+|---|---|
+| `start_win_start`, `start_win_end`, `start_win_len` | 1-based inclusive window actually used (shorter than 63 when the 5'UTR is shorter than `start_upstream`) |
+| `seq_length`, `seq_shorter_than_window` | folded length; 1 if shorter than `window`, where the whole molecule is one window and results carry end artefacts |
+| `cds_offset` | 5'UTR length (nt before the AUG) |
+| `aug_unpaired` | probability that the 3 nt of the AUG are all unpaired |
+| `start_mean_unpaired_u<l>` | mean over the window of the probability that `l` consecutive nt, wholly inside the window, are all unpaired; `NA` if the window is shorter than `l` |
+| `rnaplfold_window`, `rnaplfold_span`, `rnaplfold_u_max` | parameters used. Accessibility depends on both `W` and `L`, so report both |
+
+The `_lunp` table is end-anchored (row `i`, column `l` is the `l` nt *ending*
+at `i`); `summarize.py` handles this and `tests/test_rnaplfold_summarize.py`
+pins it. The AUG position comes from the manifest's `five_utr_length` column,
+which `01_extract.py` writes. Manifests from before that column fall back to
+the `5UTR` row; otherwise re-run `01_extract.py`.
 
 ## Configuration
 
