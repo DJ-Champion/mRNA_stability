@@ -11,6 +11,8 @@
 #   RESULTS_DIR, ERRORS_DIR, TMP_DIR, MANIFEST_TSV, RNAPLFOLD_BIN,
 #   RNAPLFOLD_WINDOW, RNAPLFOLD_SPAN, RNAPLFOLD_U_VALUES,
 #   RNAPLFOLD_START_UPSTREAM, RNAPLFOLD_START_DOWNSTREAM
+# Optional env: RNAPLFOLD_START_FLANKS, RNAPLFOLD_KEEP_LUNP (1 = keep the
+#   gzipped _lunp at $TOOL_DIR/lunp/<seqname>_lunp.gz)
 #
 # Usage: tools/rnaplfold/worker.sh <fasta_file>
 
@@ -71,12 +73,17 @@ python3 "$SRC_DIR/summarize.py" \
     --lunp "$lunp" --manifest "$MANIFEST_TSV" --seq-name "$seq_name" \
     --seq-length "$seq_length" \
     --upstream "$RNAPLFOLD_START_UPSTREAM" --downstream "$RNAPLFOLD_START_DOWNSTREAM" \
-    --u-values "$RNAPLFOLD_U_VALUES" \
+    --u-values "$RNAPLFOLD_U_VALUES" --flanks "${RNAPLFOLD_START_FLANKS:-}" \
     --window "$RNAPLFOLD_WINDOW" --span "$RNAPLFOLD_SPAN" \
     > "$work/result.csv" 2>>"$error_file" || {
     echo "ERROR: summarize.py failed for $seq_name" >> "$error_file"
     exit 1
 }
+
+if [[ "${RNAPLFOLD_KEEP_LUNP:-0}" == 1 ]]; then
+    mkdir -p "$TOOL_DIR/lunp"
+    gzip -c "$lunp" > "$TOOL_DIR/lunp/${seq_name}_lunp.gz"
+fi
 
 mv "$work/result.csv" "$output_file"
 [[ -s "$error_file" ]] || rm -f "$error_file"

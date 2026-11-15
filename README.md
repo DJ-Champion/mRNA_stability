@@ -367,23 +367,34 @@ such as `RNAPLFOLD_WINDOW` win):
 | `span` | 150 | `-L`, max base-pair span; always passed (`-W` alone silently sets it to the window size) |
 | `u_values` | `[1, 4, 8, 16]` | stretch lengths reported; `-u` is the max of these and 3 |
 | `start_upstream` / `start_downstream` | `extraction.codon_flank_length` (30) | nt either side of the AUG |
+| `start_flanks` | `[15, 60]` | extra symmetric window sizes (nt each side of the AUG) |
+| `keep_lunp` | `false` | keep the gzipped `_lunp` tables |
 
-Output columns in `combined.tsv` (on top of the manifest columns):
+Output columns in `combined.tsv` (on top of the manifest columns). `u<l>` is the
+stretch length `l`; a stretch counts only if wholly inside the window or region.
 
 | Column | Meaning |
 |---|---|
-| `start_win_start`, `start_win_end`, `start_win_len` | 1-based inclusive window actually used (shorter than 63 when the 5'UTR is shorter than `start_upstream`) |
+| `start_win_start`, `start_win_end`, `start_win_len` | 1-based inclusive primary window used (shorter than 63 when clipped at a transcript end) |
 | `seq_length`, `seq_shorter_than_window` | folded length; 1 if shorter than `window`, where the whole molecule is one window and results carry end artefacts |
 | `cds_offset` | 5'UTR length (nt before the AUG) |
 | `aug_unpaired` | probability that the 3 nt of the AUG are all unpaired |
-| `start_mean_unpaired_u<l>` | mean over the window of the probability that `l` consecutive nt, wholly inside the window, are all unpaired; `NA` if the window is shorter than `l` |
+| `start_{mean,meanlog,min,max,median,openfrac}_unpaired_u<l>` | summaries of the stretch values over the primary window. `meanlog` is the mean log10 (mean opening energy up to a constant, values floored at 1e-12); `openfrac` is the fraction above 0.5; `NA` if the window is shorter than `l` |
+| `start_{up,down}_meanlog_unpaired_u<l>` | mean log10 over the part of the window before / after the AUG |
+| `w<f>_{mean,meanlog}_unpaired_u<l>` | the same means for symmetric windows of `f` nt each side of the AUG (`start_flanks`, default 15 and 60) |
+| `{utr5,cds,utr3,cap50}_meanlog_unpaired_u<l>` | mean log10 over the 5'UTR, CDS, 3'UTR and transcript positions 1..50 (`NA` if empty or bounds unknown) |
 | `rnaplfold_window`, `rnaplfold_span`, `rnaplfold_u_max` | parameters used. Accessibility depends on both `W` and `L`, so report both |
+
+`keep_lunp: true` (dataset YAML) also keeps each gzipped `_lunp` table in
+`runs/<dataset>/rnaplfold/lunp/`; they are large, so it is off by default.
 
 The `_lunp` table is end-anchored (row `i`, column `l` is the `l` nt *ending*
 at `i`); `summarize.py` handles this and `tests/test_rnaplfold_summarize.py`
-pins it. The AUG position comes from the manifest's `five_utr_length` column,
-which `01_extract.py` writes. Manifests from before that column fall back to
-the `5UTR` row; otherwise re-run `01_extract.py`.
+pins it. The AUG position and region bounds come from the manifest's `five_utr_length`
+and `three_utr_length` columns, which `01_extract.py` writes. Manifests from
+before those columns fall back to the `5UTR` / `3UTR` rows (a missing 3'UTR
+length only makes the CDS and 3'UTR columns `NA`); a missing 5'UTR length is an
+error, so re-run `01_extract.py`.
 
 ## Configuration
 
