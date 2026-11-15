@@ -367,6 +367,7 @@ def extract_and_slice_sequences(temp_fa, out_dir, extraction_cfg, selected_trans
                     "selection_reason": tx_info.reason,
                     "short_utrs": "true" if short_utrs else "false",
                     "five_utr_length": start_idx,
+                    "three_utr_length": seq_len - end_idx,
                 })
 
             # --- UTR_pair: hybrid sequence with cross-pair constraint ---
@@ -396,6 +397,7 @@ def extract_and_slice_sequences(temp_fa, out_dir, extraction_cfg, selected_trans
                     "selection_reason": tx_info.reason,
                     "short_utrs": "true" if short_utrs else "false",
                     "five_utr_length": start_idx,
+                    "three_utr_length": seq_len - end_idx,
                 })
                 utr_pair_geometry_rows.append({
                     "seqname": seqname,
@@ -415,7 +417,7 @@ def write_manifest_tsv(manifest_rows, out_dir):
         logging.warning("No manifest rows to write.")
         return
     keys = ["seqname", "gene_id", "transcript_id", "region",
-            "length", "selection_reason", "short_utrs", "five_utr_length"]
+            "length", "selection_reason", "short_utrs", "five_utr_length", "three_utr_length"]
     path = os.path.join(out_dir, "manifest.tsv")
     with open(path, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys, delimiter='\t')

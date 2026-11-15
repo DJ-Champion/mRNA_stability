@@ -13,6 +13,8 @@
 #     u_values: [1, 4, 8, 16] # stretch lengths reported (RNAplfold -u = max)
 #     start_upstream: 30      # nt before the AUG   (default: extraction.codon_flank_length, else 30)
 #     start_downstream: 30    # nt after the AUG    (default: extraction.codon_flank_length, else 30)
+#     start_flanks: [15, 60]  # extra symmetric windows (nt each side of the AUG), mean + mean-log only
+#     keep_lunp: false        # true: keep each gzipped _lunp table in <tool_dir>/lunp/ (large)
 #
 # The start window is [AUG - upstream, AUG + 3 + downstream), clipped to the
 # transcript, which is the same span as the extracted start_codon_region.
@@ -61,13 +63,17 @@ PY
 : "${RNAPLFOLD_START_UPSTREAM:=$(_rnaplfold_yaml start_upstream 30 extraction.codon_flank_length)}"
 : "${RNAPLFOLD_START_DOWNSTREAM:=$(_rnaplfold_yaml start_downstream 30 extraction.codon_flank_length)}"
 
+: "${RNAPLFOLD_START_FLANKS:=$(_rnaplfold_yaml start_flanks '15 60')}"
+: "${RNAPLFOLD_KEEP_LUNP:=$(_rnaplfold_yaml keep_lunp 0)}"
+case "${RNAPLFOLD_KEEP_LUNP,,}" in true|1|yes) RNAPLFOLD_KEEP_LUNP=1 ;; *) RNAPLFOLD_KEEP_LUNP=0 ;; esac
+
 if [[ "$RNAPLFOLD_BIN" == */* ]]; then
     PATH="$(dirname "$RNAPLFOLD_BIN"):$PATH"
 fi
 
 export TOOL_NAME WORKER_SCRIPT COLLATE_SCRIPT TOOL_REGIONS PATH
 export RNAPLFOLD_BIN RNAPLFOLD_WINDOW RNAPLFOLD_SPAN RNAPLFOLD_U_VALUES
-export RNAPLFOLD_START_UPSTREAM RNAPLFOLD_START_DOWNSTREAM
+export RNAPLFOLD_START_UPSTREAM RNAPLFOLD_START_DOWNSTREAM RNAPLFOLD_START_FLANKS RNAPLFOLD_KEEP_LUNP
 
 # Time and memory are not measured yet: run calibration (03_calibrate.sh) and
 # check the first real run. Defaults from lib/paths.sh scale 1:1 with the
