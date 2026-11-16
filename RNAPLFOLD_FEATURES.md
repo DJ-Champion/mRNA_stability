@@ -26,7 +26,7 @@ Fold is local (pairs span at most 150 nt), so long-range pairing is invisible.
 |---|---|---|
 | Primary start window | 30 nt before the AUG to 30 nt after it (63 nt) | `start_*` columns; clipped at transcript ends |
 | Upstream / downstream | the part of the primary window before / after the AUG | AUG itself excluded |
-| Flank windows | `f` nt either side of the AUG, `f` = 15 and 60 | `flank15_*`, `flank60_*` |
+| Flank windows | `f` nt either side of the AUG, `f` = 15 and 60 (33 and 123 nt). The primary window is flank 30 by default | `flank15_*`, `flank60_*` |
 | 5'UTR, CDS, 3'UTR | whole regions | `utr5_*`, `cds_*`, `utr3_*` |
 | Cap-proximal | transcript positions 1 to 50 | `cap50_*`; may extend into the CDS if the 5'UTR is short |
 
@@ -41,7 +41,7 @@ Fold is local (pairs span at most 150 nt), so long-range pairing is invisible.
 | **Median** | `start_median_unpaired_u<l>` | 4 | Typical position, ignoring extremes | Robust version of the mean |
 | **Open fraction** | `start_openfrac_unpaired_u<l>` | 4 | What share of the window is open? | 0 to 1; share of stretches with value > 0.5 |
 | **Up / down split** | `start_up_meanlog_unpaired_u<l>`, `start_down_meanlog_unpaired_u<l>` | 8 | Is the structure before or after the AUG? | Upstream = what a scanning ribosome meets first. `NA` if the window has no 5'UTR part |
-| **Flank windows** | `flank15_` and `flank60_` `{mean,meanlog}_unpaired_u<l>` | 16 | Does the answer depend on how much flank is included? | Compare against the primary 30/30 window. `u16` is often `NA` in `flank15` (31-nt window) |
+| **Flank windows** | `flank15_` and `flank60_` `{mean,meanlog}_unpaired_u<l>` | 16 | Does the answer depend on how much flank is included? | Compare against the primary 30/30 window. Window sizes: 33 nt (`flank15`), 63 nt (primary, i.e. flank 30), 123 nt (`flank60`); `NA` only if clipping leaves the window shorter than `l`. Only mean and mean log are computed for flanks |
 | **Regions** | `utr5_`, `cds_`, `utr3_`, `cap50_` + `meanlog_unpaired_u<l>` | 16 | Is overall structure in a region related to the outcome? | Same scale as Mean log. `NA` if the region is empty or shorter than `l` |
 | **AUG** | `aug_unpaired` | 1 | Is the start codon itself open? | 3-nt stretch value; one position, so noisy |
 
