@@ -50,8 +50,8 @@ def test_start_window_and_clipping():
     assert S.start_window(4, 12, 30, 30) == (1, 12)
 
 
-def _summ(t, up=2, down=2, u=(1, 3), three=2, flanks=(), window=300, offset=4, n=12):
-    return S.summarize(t, n, offset, three, up, down, list(u), window, list(flanks))
+def _summ(t, up=2, down=2, u=(1, 3), three=2, flanks=(), plfold_window=300, offset=4, n=12):
+    return S.summarize(t, n, offset, three, up, down, list(u), plfold_window, list(flanks))
 
 
 def test_aug_and_stretch_means():
@@ -102,8 +102,8 @@ def test_flank_variants():
     t = _load()
     r = _summ(t, flanks=(1,))
     # flank 1 -> window 4..8
-    assert _close(r['w1_mean_unpaired_u1'], sum(0.05 * i + 0.001 for i in range(4, 9)) / 5)
-    assert 'w1_meanlog_unpaired_u1' in r
+    assert _close(r['flank1_mean_unpaired_u1'], sum(0.05 * i + 0.001 for i in range(4, 9)) / 5)
+    assert 'flank1_meanlog_unpaired_u1' in r
 
 
 def test_region_means():
@@ -129,9 +129,9 @@ def test_log_floor_for_zero_probability():
 
 def test_seq_shorter_than_window_flag():
     t = _load()
-    assert _summ(t, u=(1,), window=300)['seq_shorter_than_window'] == 1
-    assert _summ(t, u=(1,), window=12)['seq_shorter_than_window'] == 0
-    assert _summ(t, u=(1,), window=12)['seq_length'] == 12
+    assert _summ(t, u=(1,), plfold_window=300)['seq_shorter_than_window'] == 1
+    assert _summ(t, u=(1,), plfold_window=12)['seq_shorter_than_window'] == 0
+    assert _summ(t, u=(1,), plfold_window=12)['seq_length'] == 12
 
 
 def test_window_shorter_than_stretch_is_na():

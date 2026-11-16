@@ -30,8 +30,8 @@ Columns (u<l> = stretch length l, for each requested l):
                                     before the AUG (NA if none)
     start_down_meanlog_unpaired_u<l>  ... after the AUG
 
-  Window-size variants (symmetric flank f nt each side of the AUG)
-    w<f>_mean_unpaired_u<l>, w<f>_meanlog_unpaired_u<l>
+  Flank windows (symmetric: f nt each side of the AUG; not RNAplfold's -W)
+    flank<f>_mean_unpaired_u<l>, flank<f>_meanlog_unpaired_u<l>
 
   Region means of log10 stretch value (whole-transcript fold)
     utr5_/cds_/utr3_meanlog_unpaired_u<l>   NA if the region is empty or its
@@ -125,12 +125,12 @@ def meanlog(vals: list[float]) -> float | None:
 
 
 def summarize(lunp, seq_len: int, cds_offset: int, three_utr_len: int | None,
-              upstream: int, downstream: int, u_values: list[int], window: int,
+              upstream: int, downstream: int, u_values: list[int], plfold_window: int,
               flanks: list[int]) -> dict[str, object]:
     s, e = start_window(cds_offset, seq_len, upstream, downstream)
     out: dict[str, object] = {
         'start_win_start': s, 'start_win_end': e, 'start_win_len': e - s + 1,
-        'seq_length': seq_len, 'seq_shorter_than_window': int(seq_len < window),
+        'seq_length': seq_len, 'seq_shorter_than_window': int(seq_len < plfold_window),
         'cds_offset': cds_offset,
     }
     aug = lunp.get(cds_offset + 3)
@@ -155,8 +155,8 @@ def summarize(lunp, seq_len: int, cds_offset: int, three_utr_len: int | None,
         fs, fe = start_window(cds_offset, seq_len, f, f)
         for l in u_values:
             v = stretch_probs(lunp, l, fs, fe)
-            out[f'w{f}_mean_unpaired_u{l}'] = mean(v)
-            out[f'w{f}_meanlog_unpaired_u{l}'] = meanlog(v)
+            out[f'flank{f}_mean_unpaired_u{l}'] = mean(v)
+            out[f'flank{f}_meanlog_unpaired_u{l}'] = meanlog(v)
 
     regions = {'utr5': (1, cds_offset), 'cap50': (1, min(CAP_LEN, seq_len))}
     if three_utr_len is not None:
@@ -189,7 +189,8 @@ def main() -> None:
     ap.add_argument('--downstream', type=int, required=True)
     ap.add_argument('--u-values', required=True, help='space/comma separated')
     ap.add_argument('--flanks', default='', help='extra symmetric flank sizes, space/comma separated')
-    ap.add_argument('--window', type=int, required=True)
+    ap.add_argument('--plfold-window', type=int, required=True,
+                    help="RNAplfold -W (not a start window or flank)")
     ap.add_argument('--span', type=int, required=True)
     args = ap.parse_args()
 
@@ -204,8 +205,8 @@ def main() -> None:
         sys.exit(f'ERROR: no rows in {args.lunp}')
     five, three = utr_lengths(args.manifest, args.seq_name)
     row = summarize(lunp, args.seq_length, five, three, args.upstream, args.downstream,
-                    u_values, args.window, flanks)
-    row.update(rnaplfold_window=args.window, rnaplfold_span=args.span, rnaplfold_u_max=u_max)
+                    u_values, args.plfold_window, flanks)
+    row.update(rnaplfold_window=args.plfold_window, rnaplfold_span=args.span, rnaplfold_u_max=u_max)
 
     print(','.join(['seq_name'] + list(row)))
     print(','.join([args.seq_name] + [fmt(row[c]) for c in row]))

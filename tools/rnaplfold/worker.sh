@@ -74,7 +74,7 @@ python3 "$SRC_DIR/summarize.py" \
     --seq-length "$seq_length" \
     --upstream "$RNAPLFOLD_START_UPSTREAM" --downstream "$RNAPLFOLD_START_DOWNSTREAM" \
     --u-values "$RNAPLFOLD_U_VALUES" --flanks "${RNAPLFOLD_START_FLANKS:-}" \
-    --window "$RNAPLFOLD_WINDOW" --span "$RNAPLFOLD_SPAN" \
+    --plfold-window "$RNAPLFOLD_WINDOW" --span "$RNAPLFOLD_SPAN" \
     > "$work/result.csv" 2>>"$error_file" || {
     echo "ERROR: summarize.py failed for $seq_name" >> "$error_file"
     exit 1
