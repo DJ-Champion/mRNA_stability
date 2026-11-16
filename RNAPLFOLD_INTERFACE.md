@@ -51,9 +51,9 @@ is configurable). A stretch counts toward a window/region only if it lies wholly
 | `start_up_meanlog_unpaired_u<l>` | mean log10 over the part of the window **before** the AUG (AUG excluded); `NA` if no 5'UTR in window |
 | `start_down_meanlog_unpaired_u<l>` | mean log10 over the part **after** the AUG |
 
-**Window-size variants** (symmetric: `f` nt each side of the AUG; default `f` = 15 and 60; the primary 30/30 is above)
+**Flank windows** (symmetric: `f` nt each side of the AUG; default `f` = 15 and 60; the primary 30/30 is above; **not** RNAplfold's `-W`)
 
-`w<f>_mean_unpaired_u<l>`, `w<f>_meanlog_unpaired_u<l>`
+`flank<f>_mean_unpaired_u<l>`, `flank<f>_meanlog_unpaired_u<l>`
 
 **Region means** of log10 stretch value, from the same whole-transcript fold
 
