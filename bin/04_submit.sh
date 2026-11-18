@@ -102,7 +102,10 @@ fi
 echo "Reading calibration recommendations from: $recs"
 echo
 
-# Helper: filter a tier list to seqnames whose region is in TOOL_REGIONS.
+# Helper: filter a tier list to seqnames whose region is in TOOL_REGIONS and,
+# if the tool sets TOOL_REQUIRE_LEN ("region:63" exact, "region:>=20" minimum,
+# "region:20-1000" range; regions without an entry take any length), whose
+# manifest length satisfies the rule (e.g. no clipped start-codon windows).
 # Echoes the path of a filtered list (in $LISTS_DIR) — or the original list
 # if no filter is set. Returns nonzero if the filtered list is empty.
 filter_list_by_region() {
@@ -111,11 +114,23 @@ filter_list_by_region() {
         echo "$input_list"; return 0
     fi
     local filtered="$LISTS_DIR/.${TOOL}_$(basename "$input_list")"
-    awk -F'\t' -v allowed="$TOOL_REGIONS" '
-        BEGIN { m = split(allowed, arr, " "); for (i=1;i<=m;i++) ok[arr[i]] = 1 }
-        # First file: manifest. Header has $1 == "seqname"; skip.
+    awk -F'\t' -v allowed="$TOOL_REGIONS" -v reqs="${TOOL_REQUIRE_LEN:-}" '
+        BEGIN {
+            m = split(allowed, arr, " "); for (i=1;i<=m;i++) ok[arr[i]] = 1
+            m = split(reqs, arr, " ")
+            for (i=1;i<=m;i++) { split(arr[i], kv, ":"); rule[kv[1]] = kv[2] }
+        }
+        function len_ok(region, len,    r, p) {
+            if (!(region in rule)) return 1
+            r = rule[region]
+            if (substr(r, 1, 2) == ">=") return len >= substr(r, 3) + 0
+            if (index(r, "-")) { split(r, p, "-"); return len >= p[1] + 0 && len <= p[2] + 0 }
+            return len == r + 0
+        }
+        # First file: manifest (seqname gene_id transcript_id region length ...).
+        # Header has $1 == "seqname"; skip.
         NR == FNR {
-            if ($1 != "seqname" && ($4 in ok)) keep[$1] = 1
+            if ($1 != "seqname" && ($4 in ok) && len_ok($4, $5)) keep[$1] = 1
             next
         }
         # Second file: tier list of FASTA paths. Match basename without .fa.
