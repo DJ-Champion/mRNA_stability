@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
 tools/rnaup_avoidance/avoidance.py
-RNAup mRNA:ncRNA interaction / avoidance for one tranche of window sequences.
+RNAup mRNA:ncRNA interaction / avoidance for one mRNA window (plus its shuffles).
 
-Input  : a multi-record FASTA of native mRNA windows (written by
-         bin/rnaup_make_tranches.py), one record per gene, one window type;
-         lengths may differ between genes (whole 5'UTR). Only these windows are
-         shuffled; the ncRNAs are used as given.
-Output : $RESULTS_DIR/results_<tranche>.csv   one row per gene (seq_name key)
-         $TOOL_DIR/raw_shuffles/<tranche>_shuffle_sums.csv.gz
+Input  : a FASTA of native mRNA windows, normally one record (the per-sequence
+         file bin/02_stratify.sh writes), of any length (whole 5'UTR varies).
+         Several records also work. Only these windows are shuffled; the ncRNAs
+         are used as given.
+Output : $RESULTS_DIR/results_<seqname>.csv   one row per gene (seq_name key)
+         $TOOL_DIR/raw_shuffles/<seqname>_shuffle_sums.csv.gz
                                               per-shuffle sums over all ncRNAs
 
 Per gene: the native window and N dinucleotide shuffles (esl-shuffle -d, the
 same method as tools/rnafold/worker.sh) go to RNAup in ONE stream per ncRNA,
 ncRNA first (--interaction_first), so the ncRNA accessibility is computed once
-per tranche and ncRNA, not once per mRNA. G_total and G_int are parsed from
+per window and ncRNA, not once per shuffled mRNA. G_total and G_int are parsed from
 "(G_total = G_int + G_u_target + G_u_query)"; pairs with no interaction count
 as 0.0 / 0.0 and stay in every sum.
 
 Checkpointing: the shuffled sequences are written once to
 $CKPT/shuffles.fa.gz and each ncRNA's parsed energies to $CKPT/<ncrna>.tsv.gz.
-A restarted task reuses both, so every ncRNA in a tranche sees the SAME shuffles
+A restarted task reuses both, so every ncRNA sees the SAME shuffles
 (esl-shuffle is unseeded; regenerating them on restart would mix shuffle sets
 inside one sum). Checkpoints are deleted after the results file is written
 unless AVOID_KEEP_CKPT=1.
@@ -33,7 +33,8 @@ Env (set by configs/tools/rnaup_avoidance.sh and lib/paths.sh):
     RESULTS_DIR TOOL_DIR TMP_DIR ERRORS_DIR  RNAUP_BIN ESL_SHUFFLE_BIN
     NCRNA_FASTA NCRNA_FAMILIES  N_SHUFFLES MIN_VALID_PERCENT
     RNAUP_ARGS (default "--interaction_first --no_output_file -b -d2 --noLP")
-    AVOID_KEEP_CKPT, SLURM_CPUS_PER_TASK (parallel ncRNAs per task)
+    AVOID_REGION (manifest region of the window), AVOID_CKPT_DIR,
+    TOOL_REQUIRE_LEN, AVOID_KEEP_CKPT, SLURM_CPUS_PER_TASK (parallel ncRNAs per task)
 """
 from __future__ import annotations
 
@@ -58,6 +59,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
                     datefmt='%H:%M:%S')
 log = logging.getLogger('rnaup_avoidance')
 
+# manifest region -> window name used in the output files
+WINDOW_NAMES = {'start_codon_region': 'start_codon_pm30', 'stop_codon_region': 'stop_codon_pm30',
+                'tail_region': 'last_100nt', '5UTR': 'utr5'}
 FAMILIES = ['tRNA', 'rRNA', 'SRP', 'snRNA', 'Y_RNA', 'snoRNA']
 DEFAULT_RNAUP_ARGS = '--interaction_first --no_output_file -b -d2 --noLP'
 
@@ -82,6 +86,22 @@ def read_fasta(path):
     if name is not None:
         out.append((name, ''.join(buf).upper().replace('T', 'U')))
     return out
+
+
+def length_ok(region, length, spec):
+    """TOOL_REQUIRE_LEN ("region:63 region:>=20 region:20-1000") check; no entry = any length.
+    bin/04_submit.sh applies the same rule to the manifest when it builds the task list."""
+    for item in (spec or '').split():
+        r, _, rule = item.partition(':')
+        if r != region:
+            continue
+        if rule.startswith('>='):
+            return length >= int(rule[2:])
+        if '-' in rule:
+            lo, hi = rule.split('-')
+            return int(lo) <= length <= int(hi)
+        return length == int(rule)
+    return True
 
 
 def gc_fraction(seq):
@@ -305,26 +325,31 @@ def finalize(tranche, seqsets, ncs, ckpt, results_dir, raw_dir, window):
                        gc_diff_mRNA_vs_ncRNA=gc - nc_gc)
             w.writerow([row[c] if isinstance(row[c], (str, int)) else fmt(row[c]) for c in head])
     os.replace(str(raw_path) + '.tmp', raw_path)
-    os.replace(tmp_csv, out_csv)   # results file last: its existence means "tranche done"
+    os.replace(tmp_csv, out_csv)   # results file last: its existence means "gene done"
     return out_csv
 
 
 def main():
     if len(sys.argv) != 2:
-        sys.exit('Usage: avoidance.py <tranche_fasta>')
+        sys.exit('Usage: avoidance.py <window_fasta>')
     fasta = Path(sys.argv[1])
-    tranche = fasta.stem
+    tranche = fasta.stem         # = manifest seqname for the per-sequence flow
     env = os.environ
     results_dir, tool_dir = env['RESULTS_DIR'], Path(env['TOOL_DIR'])
     n_shuf = int(env.get('N_SHUFFLES', '1000'))
     min_valid = n_shuf * int(env.get('MIN_VALID_PERCENT', '90')) // 100
     rnaup_args = shlex.split(env.get('RNAUP_ARGS') or DEFAULT_RNAUP_ARGS)
-    window = fasta.parent.name        # tranches/<window>/<tranche>.fa
+    region = env.get('AVOID_REGION', '')
+    window = WINDOW_NAMES.get(region, region or 'NA')
 
     ncs = load_ncrnas(env['NCRNA_FASTA'], env['NCRNA_FAMILIES'])
     genes = read_fasta(fasta)
 
-    ckpt = tool_dir / 'ckpt' / tranche
+    bad = [(g, len(q)) for g, q in genes if not length_ok(region, len(q), env.get('TOOL_REQUIRE_LEN'))]
+    if bad:
+        sys.exit(f'{tranche}: window length violates TOOL_REQUIRE_LEN for {region}: {bad}')
+
+    ckpt = Path(env.get('AVOID_CKPT_DIR') or tool_dir / 'ckpt' / tranche)
     ckpt.mkdir(parents=True, exist_ok=True)
     scratch = env.get('TMPDIR') or env.get('TMP_DIR')
     os.makedirs(scratch, exist_ok=True)

@@ -2,54 +2,55 @@
 
 Per mRNA window: RNAup binding energies against 34 abundant human ncRNAs (6 families), summed, with a
 dinucleotide-shuffle robust Z. Tool `rnaup_avoidance`; code in `tools/rnaup_avoidance/`,
-`bin/rnaup_make_tranches.py`, `configs/tools/rnaup_avoidance.sh`.
+`configs/tools/rnaup_avoidance.sh`.
 
 ## Run
 
-    # inputs: data/ncrna/curated-interaction-database.fa (not in the repo), configs/ncrna/families.tsv (in the repo)
-    ./bin/rnaup_make_tranches.py -d human_all                       # start_codon_pm30; -M genes per tranche (10)
-    ./bin/rnaup_make_tranches.py -d human_all --regions stop_codon_pm30 last_100nt utr5
-    SLURM_TIME=06:00:00 SLURM_MEM_PER_CPU=2000MB \
-        ./bin/04_submit.sh -d human_all -t rnaup_avoidance --list runs/human_all/lists/rnaup_start_codon_pm30.txt
+Same flow as the other tools, one window FASTA per task:
+
+    ./bin/01_extract.py -d human_all           # needs start_codon_region (+ stop_codon_region, tail_region, 5UTR if used)
+    ./bin/02_stratify.sh -d human_all
+    export SLURM_CPUS_PER_TASK=34              # same value for calibrate and submit: a task runs the 34 ncRNAs in parallel
+    ./bin/03_calibrate.sh -d human_all -t rnaup_avoidance      # on a compute node
+    ./bin/04_submit.sh -d human_all -t rnaup_avoidance
     ./bin/05_collate.sh -d human_all -t rnaup_avoidance
 
-Cluster timing test on 10 genes (`configs/datasets/human_10.yaml`; put the gene IDs in `data/human/gene_ids_human_10.txt`):
+Pick windows with `TOOL_REGIONS` (default `start_codon_region`), set the same way for calibrate and submit:
 
-    ./bin/01_extract.py -d human_10
-    ./bin/rnaup_make_tranches.py -d human_10 --regions start_codon_pm30 utr5 -M 10
-    SLURM_CPUS_PER_TASK=34 SLURM_TIME=24:00:00 SLURM_MEM_PER_CPU=1000MB \
-        ./bin/04_submit.sh -d human_10 -t rnaup_avoidance --list runs/human_10/lists/rnaup_start_codon_pm30.txt
+    TOOL_REGIONS="start_codon_region stop_codon_region tail_region 5UTR" ./bin/04_submit.sh -d human_all -t rnaup_avoidance
 
-Local timing (RNAup 2.4.7, 341-nt ncRNA, random windows): about 0.4 s per 63-nt target and 1.6 s per 200-nt target
-per core, so one 10-gene tranche at N=1000 is roughly 39 core-hours for 63-nt windows. Use `N_SHUFFLES=100` for a first look.
+Timing test on 10 genes: `configs/datasets/human_10.yaml` (put the IDs in `data/human/gene_ids_human_10.txt`), then the
+same steps with `-d human_10`; `N_SHUFFLES=100` for a first look. Calibration runs the real code with
+`AVOID_CALIB_SHUFFLES` (default 2) shuffles and extrapolates by (N+1)/(2+1); that includes the fixed per-run cost, so it
+errs high. It writes nothing to `results/`.
 
-Try one tranche first with `N_SHUFFLES=5` and read the timing and the first rows before the full run.
-Needs `start_codon_region` (and `stop_codon_region`, `tail_region`, `5UTR` for the other windows) in the
-dataset's `regions_to_extract`. Calibration/tiers are not used (fixed-length windows).
+Local timing (RNAup 2.4.7, 341-nt ncRNA, random windows): about 0.4 s per 63-nt target and 1.6 s per 200-nt target per
+core, so one 63-nt gene at N=1000 is roughly 3.9 core-hours (34 ncRNAs x 1001 sequences).
 
 ## Windows
 
-| window | source region | length | keeps only |
-|---|---|---|---|
-| `start_codon_pm30` | `start_codon_region` | 63 | 5'UTR >= 30 |
-| `stop_codon_pm30` | `stop_codon_region` | 63 | 3'UTR >= 30 |
-| `last_100nt` | `tail_region` | 100 | mRNA >= 100 |
-| `utr5` | `5UTR`, whole | varies | 5'UTR >= 20 (`--min-utr5-length`) |
+| manifest region (`TOOL_REGIONS`) | output `window` | kept only if (`TOOL_REQUIRE_LEN`) |
+|---|---|---|
+| `start_codon_region` | `start_codon_pm30` | exactly 63 nt (5'UTR >= 30) |
+| `stop_codon_region` | `stop_codon_pm30` | exactly 63 nt (3'UTR >= 30) |
+| `tail_region` | `last_100nt` | exactly 100 nt |
+| `5UTR` | `utr5` | >= 20 nt; whole 5'UTR, length varies |
 
-Fixed windows are filtered on exact length, so nothing truncated reaches RNAup. `utr5` is variable-length: tranches are sorted by length and also capped at 1500 nt total (`--max-tranche-nt`), and cost grows with UTR length. Assumes `codon_flank_length: 30`,
-`tail_length: 100` in the dataset YAML.
+`04_submit.sh` applies `TOOL_REQUIRE_LEN` to the manifest when it builds each tier's task list, and the worker
+re-checks it, so nothing clipped reaches RNAup. Rule syntax: `region:63` exact, `region:>=20` minimum,
+`region:20-1000` range. Cost grows steeply with window length; consider capping 5UTR.
 
 ## Method
 
-Per tranche, per ncRNA (34 RNAup processes, `SLURM_CPUS_PER_TASK` at a time): one stream, ncRNA first, then every
+Per gene, per ncRNA (34 RNAup processes, `SLURM_CPUS_PER_TASK` at a time): one stream, ncRNA first, then every
 gene's native window and N=1000 `esl-shuffle -d` shuffles, `RNAup --interaction_first --no_output_file -b -d2 --noLP`
 (override with `RNAUP_ARGS`). From `(G_total = G_int + G_u_target + G_u_query)` we keep `G_total` and `G_int`;
 a pair with no interaction line is 0/0 and stays in all sums. A target header missing from RNAup's output
-fails the tranche (truncation / unexpected format) instead of scoring as 0.
+fails the gene (truncation / unexpected format) instead of scoring as 0.
 
-Checkpoints in `<tool_dir>/ckpt/<tranche>/`: the shuffled sequences (written once) and one gz per ncRNA. A restarted
-task reuses both, so all ncRNAs in a tranche see the same shuffles. `AVOID_KEEP_CKPT=1` keeps them.
-The results file is written last; its existence means the tranche is done.
+Checkpoints in `<tool_dir>/ckpt/<seqname>/`: the shuffled sequences (written once) and one gz per ncRNA. A restarted
+task reuses both, so all 34 ncRNAs see the same shuffles. `AVOID_KEEP_CKPT=1` keeps them.
+The results file is written last; its existence means the gene is done.
 
 Energies in kcal/mol; more negative = stronger binding. Robust Z =
 `(native - median(shuffles)) / (1.4826 * MAD(shuffles))`, `NA` when MAD = 0 (same as the RNAfold worker). The null is
@@ -58,9 +59,9 @@ expected for this window's dinucleotide composition". Only the mRNA windows are 
 
 ## Output
 
-`runs/<dataset>/rnaup_avoidance/`: `results/results_<tranche>.csv` (one row per gene), `combined.tsv` (joined with
+`runs/<dataset>/rnaup_avoidance/`: `results/results_<seqname>.csv`, `combined.tsv` (joined with
 the manifest on `seqname`, via the rnalfold collator), `avoidance_<window>.tsv` (one per window),
-`raw_shuffles/<tranche>_shuffle_sums.csv.gz` (per-shuffle sums over the 34).
+`raw_shuffles/<seqname>_shuffle_sums.csv.gz` (per-shuffle sums over the 34).
 
 | columns | meaning |
 |---|---|
