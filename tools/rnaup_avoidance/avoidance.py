@@ -18,8 +18,10 @@ per window and ncRNA, not once per shuffled mRNA. G_total and G_int are parsed f
 "(G_total = G_int + G_u_target + G_u_query)"; pairs with no interaction count
 as 0.0 / 0.0 and stay in every sum.
 
-Checkpointing: the shuffled sequences are written once to
-$CKPT/shuffles.fa.gz and each ncRNA's parsed energies to $CKPT/<ncrna>.tsv.gz.
+Work units and checkpointing: the task's cores are fed (ncRNA, chunk of
+AVOID_CHUNK targets) units, longest ncRNA first. The shuffled sequences are
+written once to $CKPT/shuffles.fa.gz and each unit's parsed energies to
+$CKPT/<ncrna>.c<chunk>.<NNN>.tsv.gz.
 A restarted task reuses both, so every ncRNA sees the SAME shuffles
 (esl-shuffle is unseeded; regenerating them on restart would mix shuffle sets
 inside one sum). Checkpoints are deleted after the results file is written
@@ -34,7 +36,7 @@ Env (set by configs/tools/rnaup_avoidance.sh and lib/paths.sh):
     NCRNA_FASTA NCRNA_FAMILIES  N_SHUFFLES MIN_VALID_PERCENT
     RNAUP_ARGS (default "--interaction_first --no_output_file -b -d2 --noLP")
     AVOID_REGION (manifest region of the window), AVOID_CKPT_DIR,
-    TOOL_REQUIRE_LEN, AVOID_KEEP_CKPT, SLURM_CPUS_PER_TASK (parallel ncRNAs per task)
+    TOOL_REQUIRE_LEN, AVOID_CHUNK (default 100), AVOID_KEEP_CKPT, SLURM_CPUS_PER_TASK (parallel units per task)
 """
 from __future__ import annotations
 
@@ -229,27 +231,33 @@ def build_sequence_set(genes, esl_bin, n_shuf, min_valid, ckpt):
     return out
 
 
-def ncrna_checkpoint(ckpt, nc, targets, rnaup_bin, rnaup_args, scratch):
+def unit_checkpoint(ckpt, nc, chunk, ci, targets, rnaup_bin, rnaup_args, scratch):
+    """One work unit: ncRNA `nc` against targets[ci*chunk:(ci+1)*chunk]. ncRNA first in the
+    stream, so its accessibility is computed once per unit (~0.5 s, about 2% of a 100-target unit)."""
     name, seq, _ = nc
-    path = ckpt / f'{name}.tsv.gz'
+    path = ckpt / f'{name}.c{chunk}.{ci:03d}.tsv.gz'
     if path.exists():
         return path
-    res = run_rnaup(rnaup_bin, rnaup_args, name, seq, targets, scratch)
-    tmp = ckpt / f'{name}.tsv.gz.tmp'
+    part = targets[ci * chunk:(ci + 1) * chunk]
+    res = run_rnaup(rnaup_bin, rnaup_args, name, seq, part, scratch)
+    tmp = ckpt / (path.name + '.tmp')
     with gzip.open(tmp, 'wt') as f:
-        for t, _ in targets:
+        for t, _ in part:
             gt, gi = res[t]
             f.write(f'{gt:.2f}\t{gi:.2f}\n')
     os.replace(tmp, path)
-    log.info('ncRNA %s done', name)
     return path
+
+
+def checkpoint_files(ckpt, name, chunk):
+    return sorted(ckpt.glob(f'{name}.c{chunk}.*.tsv.gz'))
 
 
 def fmt(v):
     return 'NA' if v is None else f'{v:.4f}'
 
 
-def finalize(tranche, seqsets, ncs, ckpt, results_dir, raw_dir, window):
+def finalize(tranche, seqsets, ncs, ckpt, chunk, results_dir, raw_dir, window):
     """Sum ncRNA checkpoints -> per-gene result rows + per-shuffle sums."""
     n_seq = sum(len(s) for _, s in seqsets)
     fam_idx = {f: [k for k, nc in enumerate(ncs) if nc[2] == f] for f in FAMILIES}
@@ -263,16 +271,19 @@ def finalize(tranche, seqsets, ncs, ckpt, results_dir, raw_dir, window):
         i += len(s)
     native_pos = {starts[g]: g for g, _ in seqsets}
     for k, (name, _, family) in enumerate(ncs):
-        with gzip.open(ckpt / f'{name}.tsv.gz', 'rt') as f:
-            for j, line in enumerate(f):
-                a, b = line.split('\t')
-                for m, v in ((0, float(a)), (1, float(b))):
-                    sums[(m, 'all')][j] += v
-                    sums[(m, family)][j] += v
-                    if j in native_pos:
-                        d = native_min[m]
-                        gname = native_pos[j]
-                        d[gname] = v if gname not in d else min(d[gname], v)
+        j = -1
+        for cf in checkpoint_files(ckpt, name, chunk):
+            with gzip.open(cf, 'rt') as f:
+                for line in f:
+                    j += 1
+                    a, b = line.split('\t')
+                    for m, v in ((0, float(a)), (1, float(b))):
+                        sums[(m, 'all')][j] += v
+                        sums[(m, family)][j] += v
+                        if j in native_pos:
+                            d = native_min[m]
+                            gname = native_pos[j]
+                            d[gname] = v if gname not in d else min(d[gname], v)
         if j + 1 != n_seq:
             raise RuntimeError(f'checkpoint {name} has {j + 1} rows, expected {n_seq}')
 
@@ -361,12 +372,20 @@ def main():
     log.info('%s: %d genes, %d sequences per ncRNA, %d ncRNAs', tranche, len(seqsets),
              len(targets), len(ncs))
 
+    # Work units = (ncRNA, chunk of targets), longest ncRNA first. RNAup time grows about linearly
+    # with ncRNA length (72 nt ~0.06 s/target, 341 nt ~0.37 s), so one process per ncRNA leaves most
+    # cores idle behind the longest one; many small units keep any core count busy.
+    chunk = int(env.get('AVOID_CHUNK', '100'))
+    n_chunks = -(-len(targets) // chunk)
+    units = [(nc, ci) for nc in sorted(ncs, key=lambda x: -len(x[1])) for ci in range(n_chunks)]
     workers = max(1, int(env.get('SLURM_CPUS_PER_TASK', '1')))
+    log.info('%d work units (%d ncRNAs x %d chunks of <= %d) on %d worker(s)',
+             len(units), len(ncs), n_chunks, chunk, workers)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(ex.map(lambda nc: ncrna_checkpoint(ckpt, nc, targets, env['RNAUP_BIN'],
-                                                rnaup_args, scratch), ncs))
+        list(ex.map(lambda u: unit_checkpoint(ckpt, u[0], chunk, u[1], targets, env['RNAUP_BIN'],
+                                              rnaup_args, scratch), units))
 
-    out = finalize(tranche, seqsets, ncs, ckpt, results_dir, tool_dir / 'raw_shuffles', window)
+    out = finalize(tranche, seqsets, ncs, ckpt, chunk, results_dir, tool_dir / 'raw_shuffles', window)
     if env.get('AVOID_KEEP_CKPT') != '1':
         shutil.rmtree(ckpt, ignore_errors=True)
     log.info('wrote %s', out)

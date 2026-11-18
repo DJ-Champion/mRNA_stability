@@ -79,7 +79,7 @@ def env(tmp_path):
     e = dict(os.environ, RESULTS_DIR=str(tool / 'results'), TOOL_DIR=str(tool), TMPDIR=str(tmp_path / 'scratch'),
              RNAUP_BIN=str(stub), ESL_SHUFFLE_BIN=ESL, NCRNA_FASTA=str(tmp_path / 'nc.fa'),
              NCRNA_FAMILIES=str(tmp_path / 'fam.tsv'), N_SHUFFLES='20', MIN_VALID_PERCENT='90',
-             AVOID_KEEP_CKPT='1',
+             AVOID_KEEP_CKPT='1', AVOID_CHUNK='25',
              SLURM_CPUS_PER_TASK='2', AVOID_REGION='start_codon_region')
     # fam.tsv above lists tRNA twice, which is fine; ids are what must match the FASTA
     return dict(fa=fa, e=e, tool=tool, genes=genes, ncs=ncs)
@@ -130,7 +130,7 @@ def test_restart_reuses_the_same_shuffles(env):
     a = gzip.open(first, 'rt').read()
     (env['tool'] / 'results' / 'results_start_codon_pm30_0001.csv').unlink()
     first.unlink()
-    # a lost ncRNA checkpoint is recomputed against the persisted shuffles, not new ones
+    # a lost work-unit checkpoint is recomputed against the persisted shuffles, not new ones
     next((env['tool'] / 'ckpt' / 'start_codon_pm30_0001').glob('URS3_*.tsv.gz')).unlink()
     run(env)
     assert gzip.open(first, 'rt').read() == a
@@ -241,3 +241,15 @@ def test_calibration_mode_leaves_no_results(env, tmp_path):
     assert not list((tool / 'results').glob('*')) and not (tool / 'raw_shuffles').exists()
     # and a real run afterwards is not mistaken for done
     assert 'Done' in run_worker(env, tmp_path, calib=False)[2]
+
+
+def test_chunk_size_does_not_change_results(env):
+    run(env)
+    a = read_results(env)
+    shutil.rmtree(env['tool'])
+    env['e']['AVOID_CHUNK'] = '7'           # same numbers from different work units (shuffles differ -> compare natives)
+    run(env)
+    b = read_results(env)
+    for ra, rb in zip(a, b):
+        for c in ('rnaup_G_total_sum', 'avoidance_G_int_sum', 'rnaup_G_total_min', 'rnaup_G_total_sum_tRNA'):
+            assert ra[c] == rb[c]

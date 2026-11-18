@@ -10,7 +10,7 @@ Same flow as the other tools, one window FASTA per task:
 
     ./bin/01_extract.py -d human_all           # needs start_codon_region (+ stop_codon_region, tail_region, 5UTR if used)
     ./bin/02_stratify.sh -d human_all
-    export SLURM_CPUS_PER_TASK=34              # same value for calibrate and submit: a task runs the 34 ncRNAs in parallel
+    export SLURM_CPUS_PER_TASK=8               # same value for calibrate and submit; any count works
     ./bin/03_calibrate.sh -d human_all -t rnaup_avoidance      # on a compute node
     ./bin/04_submit.sh -d human_all -t rnaup_avoidance
     ./bin/05_collate.sh -d human_all -t rnaup_avoidance
@@ -24,8 +24,9 @@ same steps with `-d human_10`; `N_SHUFFLES=100` for a first look. Calibration ru
 `AVOID_CALIB_SHUFFLES` (default 2) shuffles and extrapolates by (N+1)/(2+1); that includes the fixed per-run cost, so it
 errs high. It writes nothing to `results/`.
 
-Local timing (RNAup 2.4.7, 341-nt ncRNA, random windows): about 0.4 s per 63-nt target and 1.6 s per 200-nt target per
-core, so one 63-nt gene at N=1000 is roughly 3.9 core-hours (34 ncRNAs x 1001 sequences).
+Local timing (RNAup 2.4.7, one core, random 63-nt windows): cost per target grows about linearly with ncRNA length,
+~0.06 s for a 72-nt ncRNA and ~0.37 s for the 341-nt one (20 of the 34 are 72-84 nt), roughly 3-6 s for all 34. So one gene at
+N=1000 is roughly 1-1.6 core-hours (200-nt windows cost ~4x more per target). Treat these as estimates until the 10-gene run.
 
 ## Windows
 
@@ -42,13 +43,14 @@ re-checks it, so nothing clipped reaches RNAup. Rule syntax: `region:63` exact, 
 
 ## Method
 
-Per gene, per ncRNA (34 RNAup processes, `SLURM_CPUS_PER_TASK` at a time): one stream, ncRNA first, then every
-gene's native window and N=1000 `esl-shuffle -d` shuffles, `RNAup --interaction_first --no_output_file -b -d2 --noLP`
+A gene's native window and N=1000 `esl-shuffle -d` shuffles are cut into chunks of `AVOID_CHUNK` (100) targets. A work
+unit is one ncRNA against one chunk: a stream with the ncRNA first, then the chunk, `RNAup --interaction_first --no_output_file -b -d2 --noLP`
 (override with `RNAUP_ARGS`). From `(G_total = G_int + G_u_target + G_u_query)` we keep `G_total` and `G_int`;
 a pair with no interaction line is 0/0 and stays in all sums. A target header missing from RNAup's output
 fails the gene (truncation / unexpected format) instead of scoring as 0.
 
-Checkpoints in `<tool_dir>/ckpt/<seqname>/`: the shuffled sequences (written once) and one gz per ncRNA. A restarted
+Units run `SLURM_CPUS_PER_TASK` at a time, longest ncRNA first, so cores stay busy despite the 72-341 nt spread.
+Checkpoints in `<tool_dir>/ckpt/<seqname>/`: the shuffled sequences (written once) and one gz per unit. A restarted
 task reuses both, so all 34 ncRNAs see the same shuffles. `AVOID_KEEP_CKPT=1` keeps them.
 The results file is written last; its existence means the gene is done.
 
