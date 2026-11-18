@@ -21,11 +21,13 @@
 # no clipped window reaches RNAup. Shuffles are NOT seeded (as in the RNAfold tools);
 # the worker persists them per gene so a restarted task reuses the same ones.
 #
-# Each task runs the 34 ncRNAs one after another (SLURM_CPUS_PER_TASK at a time), so
-# set SLURM_CPUS_PER_TASK (e.g. 34) for BOTH 03_calibrate and 04_submit. Time is
-# ~ (N+1) * 34 RNAup target evaluations per gene: roughly 0.4 s each for a 63-nt window
-# and 1.6 s for 200 nt (RNAup 2.4.7, one core). Very long 5'UTRs get expensive; cap
-# them with e.g. TOOL_REQUIRE_LEN="... 5UTR:20-1000".
+# A task works through (ncRNA, chunk of AVOID_CHUNK=100 targets) units on SLURM_CPUS_PER_TASK
+# cores, longest ncRNA first, so any core count stays busy (8 is a good start; 34 is not needed).
+# Set SLURM_CPUS_PER_TASK to the same value for BOTH 03_calibrate and 04_submit. RNAup cost grows
+# about linearly with ncRNA length: ~0.06 s per 63-nt target for a 72-nt ncRNA, ~0.37 s for the
+# 341-nt one, roughly 3-6 s for all 34 (RNAup 2.4.7, one core), so ~1-1.6 core-hours per gene at N=1000.
+# Longer windows cost more (200 nt ~4x per target). Cap very long 5'UTRs with
+# TOOL_REQUIRE_LEN="... 5UTR:20-1000".
 #
 # Shell/env overrides win, e.g. N_SHUFFLES=100, RNAUP_ARGS="... -w 40".
 
@@ -45,9 +47,10 @@ PATH="$(dirname "$RNAUP_BIN"):$(dirname "$ESL_SHUFFLE_BIN"):$PATH"
 : "${N_SHUFFLES:=1000}"
 : "${MIN_VALID_PERCENT:=90}"
 : "${AVOID_KEEP_CKPT:=0}"
+: "${AVOID_CHUNK:=100}"
 
 export TOOL_NAME WORKER_SCRIPT COLLATE_SCRIPT PATH RNAUP_BIN ESL_SHUFFLE_BIN \
-       NCRNA_FASTA NCRNA_FAMILIES RNAUP_ARGS N_SHUFFLES MIN_VALID_PERCENT AVOID_KEEP_CKPT
+       NCRNA_FASTA NCRNA_FAMILIES RNAUP_ARGS N_SHUFFLES MIN_VALID_PERCENT AVOID_KEEP_CKPT AVOID_CHUNK
 
 : "${TOOL_REGIONS:=start_codon_region}"
 : "${TOOL_REQUIRE_LEN:=start_codon_region:63 stop_codon_region:63 tail_region:100 5UTR:>=20}"
