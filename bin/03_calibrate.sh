@@ -31,6 +31,10 @@ mkdir -p "$calib_root"
 report="$calib_root/recommendations.tsv"
 detail="$calib_root/per_sample.tsv"
 verify_file="$calib_root/verify.tsv"
+# Wall times only hold for the core count they were measured on (rnaup_avoidance runs
+# SLURM_CPUS_PER_TASK units in parallel); 04_submit refuses a different count.
+# Inside `srun -c N` SLURM sets SLURM_CPUS_PER_TASK=N itself, so record what was used.
+echo "$SLURM_CPUS_PER_TASK" > "$calib_root/cpus_per_task"
 
 # --- Helpers ---
 parse_elapsed() {
@@ -86,6 +90,7 @@ calib_kvs=$(calib_params)
 echo "Calibration sandbox: $calib_root"
 echo "Tool: $TOOL  |  calib_params: ${calib_kvs:-<none>}"
 echo "Samples per tier: $SAMPLES_PER_TIER"
+echo "CPUs per task: $SLURM_CPUS_PER_TASK  (04_submit must use the same)"
 echo
 
 # --- Per-tier loop ---
