@@ -99,6 +99,22 @@ if [[ ! -s "$recs" ]]; then
     exit 1
 fi
 
+# The recommended times were measured at the calibration's core count; a task given fewer
+# cores runs proportionally longer and hits its limit.
+calib_cpus_file="$CALIBRATION_ROOT/latest/cpus_per_task"
+if [[ -s "$calib_cpus_file" ]]; then
+    calib_cpus=$(< "$calib_cpus_file")
+    if [[ "$calib_cpus" != "$SLURM_CPUS_PER_TASK" ]]; then
+        echo "ERROR: calibration ran with SLURM_CPUS_PER_TASK=$calib_cpus but this submit has $SLURM_CPUS_PER_TASK." >&2
+        echo "       Its time limits are only valid at $calib_cpus CPUs: rerun with SLURM_CPUS_PER_TASK=$calib_cpus," >&2
+        echo "       or recalibrate with the CPU count you want." >&2
+        exit 1
+    fi
+else
+    echo "WARNING: $calib_cpus_file missing (calibration predates CPU recording);" >&2
+    echo "         time limits assume SLURM_CPUS_PER_TASK matches the calibration run." >&2
+fi
+
 echo "Reading calibration recommendations from: $recs"
 echo
 

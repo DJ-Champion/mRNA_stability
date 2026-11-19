@@ -18,7 +18,9 @@ Same flow as the other tools, one window FASTA per task:
 Timing test on 10 genes: `configs/datasets/human_10.yaml` (put the IDs in `data/human/gene_ids_human_10.txt`), then the
 same steps with `-d human_10`. `N_SHUFFLES` defaults to 100 (`N_SHUFFLES=1000` for a finer null). Calibration runs the real code with
 `AVOID_CALIB_SHUFFLES` (default 20) shuffles and extrapolates by (N+1)/(20+1); that includes the fixed per-run cost, so it
-errs high. 03_calibrate rounds the measured wall to whole seconds before extrapolating, so a run of only a few seconds
+errs high. The times hold only at the calibration's core count: `srun -c N` sets `SLURM_CPUS_PER_TASK=N` by itself, so a
+calibration inside `srun -c 8` followed by a submit from the login node (default 1) gives 1-core tasks 8-core limits.
+03_calibrate records the count (`calibration/<ts>/cpus_per_task`) and 04_submit refuses a different one. 03_calibrate rounds the measured wall to whole seconds before extrapolating, so a run of only a few seconds
 (as with 2 shuffles on 8 cores) can be off by +-50%; 20 keeps that to a few percent. It writes nothing to `results/`.
 
 Local timing (RNAup 2.4.7, one core, random 63-nt windows): cost per target grows about linearly with ncRNA length,
