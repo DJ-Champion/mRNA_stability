@@ -50,6 +50,8 @@ re-extracted, `N_SHUFFLES` changed) the checkpoint is discarded and rebuilt. `AV
 Progress (`k/n units done`) streams to the SLURM log while the task runs.
 The results file is written last; its existence means the gene is done.
 
+Downstream (R) ingestion contract: `RNAUP_AVOIDANCE_INTERFACE.md`.
+
 The avoidance score is `avoidance_G_int_*`: `G_int`, RNAup's duplex (hybridisation) term of the predicted
 interaction, without the opening penalties. `rnaup_G_total_*` (duplex + opening) is kept only for reference.
 Energies in kcal/mol; more negative = stronger binding. Robust Z =
