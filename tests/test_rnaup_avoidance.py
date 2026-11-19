@@ -160,17 +160,29 @@ def test_length_ok_rules():
 
 
 def test_violating_window_is_refused(env):
+    # no TOOL_REQUIRE_LEN in env: the built-in start_codon_region:63 still applies (5'UTR < 30 -> clipped)
     env['fa'].write_text('>G_T_start_codon_region\nACGUACGUAC\n')
-    env['e']['TOOL_REQUIRE_LEN'] = 'start_codon_region:63'
     p = subprocess.run([sys.executable, str(REPO / 'tools/rnaup_avoidance/avoidance.py'), str(env['fa'])],
                        env=env['e'], capture_output=True, text=True)
     assert p.returncode != 0 and 'violates TOOL_REQUIRE_LEN' in p.stderr
 
 
-def test_variable_length_tranche_end_to_end(env):
-    env['fa'].write_text(''.join(f'>{k}\n{s[:30 + 10 * i]}\n' for i, (k, s) in enumerate(env['genes'].items())))
-    run(env)
-    assert [r['window_length'] for r in read_results(env)] == ['30', '40', '50']
+@pytest.mark.parametrize('region', ['5UTR', 'stop_codon_region', 'tail_region', ''])
+def test_only_the_start_codon_window_is_scored(env, region):
+    env['e']['AVOID_REGION'] = region
+    p = subprocess.run([sys.executable, str(REPO / 'tools/rnaup_avoidance/avoidance.py'), str(env['fa'])],
+                       env=env['e'], capture_output=True, text=True)
+    assert p.returncode != 0 and 'is not scored' in p.stderr
+
+
+def test_config_fixes_region_and_defaults():
+    # env overrides of the region/length rules are ignored; N_SHUFFLES / AVOID_CHUNK keep their defaults
+    e = {k: v for k, v in os.environ.items() if k not in ('N_SHUFFLES', 'AVOID_CHUNK')}
+    e.update(PROJECT_ROOT=str(REPO), TOOL_REGIONS='5UTR tail_region', TOOL_REQUIRE_LEN='5UTR:>=20')
+    out = subprocess.run(['bash', '-c', 'source configs/tools/rnaup_avoidance.sh; '
+                          'echo "$TOOL_REGIONS|$TOOL_REQUIRE_LEN|$N_SHUFFLES|$AVOID_CHUNK"'],
+                         cwd=REPO, env=e, capture_output=True, text=True, check=True).stdout.strip()
+    assert out == 'start_codon_region|start_codon_region:63|100|101'
 
 
 REAL_2_4_7 = '''>nc

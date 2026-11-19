@@ -2,7 +2,7 @@
 # 10 randomly chosen human genes, for timing / smoke-testing tools/rnaup_avoidance
 # on the cluster before the full run (RNAUP_AVOIDANCE.md). Same genome, annotation and
 # isoform rules as human_all, so each gene resolves to the same transcript.
-# Only the regions the avoidance windows are cut from are extracted.
+# Only the start-codon window (start_codon_pm30) is extracted; it is the only one scored.
 # gene_list: one Ensembl gene ID per line (see data/human/gene_ids_ultrafold_shuffle_set.txt).
 
 inputs:
@@ -13,8 +13,7 @@ inputs:
 extraction:
   min_utr_length: 30
   filter_short_utrs: false
-  codon_flank_length: 30            # start_codon_pm30 / stop_codon_pm30 need 30
-  tail_length: 100                  # last_100nt needs 100
+  codon_flank_length: 30            # start_codon_pm30 needs 30
   output_mode: multifasta
   isoform_priority:
     - "appris_principal_1"
@@ -24,8 +23,5 @@ extraction:
     - "MANE_Select"
   regions_to_extract:
     - start_codon_region
-    - stop_codon_region
-    - tail_region
-    - 5UTR
 
 species: human

@@ -3,8 +3,8 @@
 tools/rnaup_avoidance/avoidance.py
 RNAup mRNA:ncRNA interaction / avoidance for one mRNA window (plus its shuffles).
 
-Input  : a FASTA of native mRNA windows, normally one record (the per-sequence
-         file bin/02_stratify.sh writes), of any length (whole 5'UTR varies).
+Input  : a FASTA of native start-codon windows (start codon +-30 nt, 63 nt),
+         normally one record (the per-sequence file bin/02_stratify.sh writes).
          Several records also work. Only these windows are shuffled; the ncRNAs
          are used as given.
 Output : $RESULTS_DIR/results_<seqname>.csv   one row per gene (seq_name key)
@@ -37,8 +37,8 @@ Env (set by configs/tools/rnaup_avoidance.sh and lib/paths.sh):
     RESULTS_DIR TOOL_DIR TMP_DIR ERRORS_DIR  RNAUP_BIN ESL_SHUFFLE_BIN
     NCRNA_FASTA NCRNA_FAMILIES  N_SHUFFLES MIN_VALID_PERCENT
     RNAUP_ARGS (default "--interaction_first --no_output_file -b -d2 --noLP")
-    AVOID_REGION (manifest region of the window), AVOID_CKPT_DIR,
-    TOOL_REQUIRE_LEN, AVOID_CHUNK (default 100), AVOID_KEEP_CKPT, SLURM_CPUS_PER_TASK (parallel units per task)
+    AVOID_REGION (manifest region of the window; must be start_codon_region), AVOID_CKPT_DIR,
+    TOOL_REQUIRE_LEN (default start_codon_region:63), AVOID_CHUNK (default 101), AVOID_KEEP_CKPT, SLURM_CPUS_PER_TASK (parallel units per task)
 """
 from __future__ import annotations
 
@@ -63,9 +63,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
                     datefmt='%H:%M:%S')
 log = logging.getLogger('rnaup_avoidance')
 
-# manifest region -> window name used in the output files
-WINDOW_NAMES = {'start_codon_region': 'start_codon_pm30', 'stop_codon_region': 'stop_codon_pm30',
-                'tail_region': 'last_100nt', '5UTR': 'utr5'}
+# manifest region -> window name used in the output files. Only the start-codon window is scored.
+WINDOW_NAMES = {'start_codon_region': 'start_codon_pm30'}
+DEFAULT_REQUIRE_LEN = 'start_codon_region:63'    # 30 + AUG + 30; shorter = 5'UTR < 30, clipped
 FAMILIES = ['tRNA', 'rRNA', 'SRP', 'snRNA', 'Y_RNA', 'snoRNA']
 DEFAULT_RNAUP_ARGS = '--interaction_first --no_output_file -b -d2 --noLP'
 
@@ -358,16 +358,19 @@ def main():
     tranche = fasta.stem         # = manifest seqname for the per-sequence flow
     env = os.environ
     results_dir, tool_dir = env['RESULTS_DIR'], Path(env['TOOL_DIR'])
-    n_shuf = int(env.get('N_SHUFFLES', '1000'))
+    n_shuf = int(env.get('N_SHUFFLES', '100'))
     min_valid = n_shuf * int(env.get('MIN_VALID_PERCENT', '90')) // 100
     rnaup_args = shlex.split(env.get('RNAUP_ARGS') or DEFAULT_RNAUP_ARGS)
     region = env.get('AVOID_REGION', '')
-    window = WINDOW_NAMES.get(region, region or 'NA')
+    if region not in WINDOW_NAMES:
+        sys.exit(f'{tranche}: region {region or "<unset>"} is not scored; only {sorted(WINDOW_NAMES)}')
+    window = WINDOW_NAMES[region]
 
     ncs = load_ncrnas(env['NCRNA_FASTA'], env['NCRNA_FAMILIES'])
     genes = read_fasta(fasta)
 
-    bad = [(g, len(q)) for g, q in genes if not length_ok(region, len(q), env.get('TOOL_REQUIRE_LEN'))]
+    bad = [(g, len(q)) for g, q in genes
+           if not length_ok(region, len(q), env.get('TOOL_REQUIRE_LEN', DEFAULT_REQUIRE_LEN))]
     if bad:
         sys.exit(f'{tranche}: window length violates TOOL_REQUIRE_LEN for {region}: {bad}')
 
@@ -386,7 +389,7 @@ def main():
     # Work units = (ncRNA, chunk of targets), longest ncRNA first. RNAup time grows about linearly
     # with ncRNA length (72 nt ~0.06 s/target, 341 nt ~0.37 s), so one process per ncRNA leaves most
     # cores idle behind the longest one; many small units keep any core count busy.
-    chunk = int(env.get('AVOID_CHUNK', '100'))
+    chunk = int(env.get('AVOID_CHUNK', '101'))
     n_chunks = -(-len(targets) // chunk)
     units = [(nc, ci) for nc in sorted(ncs, key=lambda x: -len(x[1])) for ci in range(n_chunks)]
     workers = max(1, int(env.get('SLURM_CPUS_PER_TASK', '1')))
