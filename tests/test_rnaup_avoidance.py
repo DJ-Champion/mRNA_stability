@@ -204,7 +204,7 @@ def test_real_rnaup_runs_without_stray_files(tmp_path):
 WORKER = REPO / 'tools' / 'rnaup_avoidance' / 'worker.sh'
 
 
-def run_worker(env, tmp_path, calib):
+def run_worker(env, tmp_path, calib, check=True):
     """worker.sh through lib/paths.sh, against a fabricated run dir for the human_10 dataset."""
     runs = tmp_path / 'runs'
     ex = runs / 'human_10' / 'extracted_regions'
@@ -222,6 +222,8 @@ def run_worker(env, tmp_path, calib):
     if calib:
         e['AVOID_CALIB'] = '1'
     out = subprocess.run(['bash', str(WORKER), str(fa)], env=e, capture_output=True, text=True)
+    if not check:
+        return runs / 'human_10' / 'rnaup_avoidance', name, out
     assert out.returncode == 0, out.stderr
     return runs / 'human_10' / 'rnaup_avoidance', name, out.stdout
 
@@ -233,6 +235,14 @@ def test_worker_writes_results_and_skips_when_done(env, tmp_path):
     assert 'start_codon_pm30' in res.read_text()          # region taken from the manifest
     assert not (tool / 'ckpt' / name).exists()            # checkpoints cleaned after success
     assert 'Skip' in run_worker(env, tmp_path, calib=False)[2]
+
+
+def test_worker_failure_logs_to_errors_file_and_stderr(env, tmp_path):
+    (env['tool'].parent / 'fam.tsv').write_text('ncrna_id\tfamily\nURS0_9606\ttRNA\n')
+    tool, name, out = run_worker(env, tmp_path, calib=False, check=False)
+    assert out.returncode != 0 and 'disagree' in out.stderr
+    assert 'disagree' in (tool / 'errors' / f'errors_{name}.log').read_text()
+    assert not (tool / 'results' / f'results_{name}.csv').exists()
 
 
 def test_calibration_mode_leaves_no_results(env, tmp_path):
@@ -253,3 +263,50 @@ def test_chunk_size_does_not_change_results(env):
     for ra, rb in zip(a, b):
         for c in ('rnaup_G_total_sum', 'avoidance_G_int_sum', 'rnaup_G_total_min', 'rnaup_G_total_sum_tRNA'):
             assert ra[c] == rb[c]
+
+
+def test_parse_rnaup_unparseable_energy_line_is_an_error():
+    text = '>nc\nACGU\n>s0\n(((.&.))) 1,3 : 5,7 (-5.2e0 = -8.40 + 1.90 + 1.30)\n'
+    with pytest.raises(RuntimeError, match='cannot parse'):
+        avoidance.parse_rnaup(text, ['s0'])
+
+
+def test_parse_rnaup_inf_in_any_opening_term_is_no_interaction():
+    text = '>nc\nACGU\n>s0\n.&.   0,0   :   0,0   (100.00 = 100.00 + inf + 2.31)\n'
+    assert avoidance.parse_rnaup(text, ['s0']) == {'s0': (0.0, 0.0)}
+
+
+def test_finalize_reads_units_in_chunk_order_past_1000_chunks(tmp_path):
+    # 1002 sequences, chunk 1 -> 1002 unit files; c1.1000 sorts before c1.101 as text
+    n_seq = 1002
+    seqsets = [('G', ['ACGU'] * n_seq)]
+    ncs = [('nc', 'ACGU', 'tRNA')]
+    ckpt = tmp_path / 'ckpt'
+    ckpt.mkdir()
+    for ci in range(n_seq):
+        with gzip.open(avoidance.unit_path(ckpt, 'nc', 1, ci), 'wt') as f:
+            f.write(f'{-(ci + 1):.2f}\t{-(ci + 1):.2f}\n')
+    avoidance.finalize('G', seqsets, ncs, ckpt, 1, n_seq, tmp_path / 'res', tmp_path / 'raw', 'w')
+    with gzip.open(tmp_path / 'raw' / 'G_shuffle_sums.csv.gz', 'rt') as f:
+        raw = list(csv.DictReader(f))
+    assert [float(r['G_total_sum']) for r in raw] == [-(i + 1) for i in range(1, n_seq)]
+    with open(tmp_path / 'res' / 'results_G.csv') as f:
+        assert float(next(csv.DictReader(f))['rnaup_G_total_sum']) == -1
+
+
+def test_stale_shuffle_checkpoint_is_discarded(env):
+    run(env)
+    ckpt = env['tool'] / 'ckpt' / 'start_codon_pm30_0001'
+    (env['tool'] / 'results' / 'results_start_codon_pm30_0001.csv').unlink()
+    # the window was re-extracted (same name, new sequence) and N_SHUFFLES changed
+    name = next(iter(env['genes']))
+    new = 'GC' * 31 + 'G'
+    env['fa'].write_text(''.join(f'>{k}\n{new if k == name else s}\n' for k, s in env['genes'].items()))
+    env['e']['N_SHUFFLES'] = '15'
+    p = run(env)
+    assert 'stale' in p.stderr
+    rows = {r['seq_name']: r for r in read_results(env)}
+    assert float(rows[name]['gc_content_mRNA_window']) == pytest.approx(1.0)
+    assert {r['n_shuffles'] for r in rows.values()} == {'15'}
+    natives = [s for rec, s in avoidance.read_fasta(ckpt / 'shuffles.fa.gz') if rec == f'{name}|0']
+    assert natives == [new]

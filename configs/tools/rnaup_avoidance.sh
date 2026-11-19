@@ -19,7 +19,8 @@
 #
 # 04_submit applies TOOL_REQUIRE_LEN to the task list and the worker re-checks it, so
 # no clipped window reaches RNAup. Shuffles are NOT seeded (as in the RNAfold tools);
-# the worker persists them per gene so a restarted task reuses the same ones.
+# the worker persists them per gene so a restarted task reuses the same ones (and rebuilds
+# them if the window or N_SHUFFLES changed).
 #
 # A task works through (ncRNA, chunk of AVOID_CHUNK=100 targets) units on SLURM_CPUS_PER_TASK
 # cores, longest ncRNA first, so any core count stays busy (8 is a good start; 34 is not needed).
@@ -54,7 +55,9 @@ export TOOL_NAME WORKER_SCRIPT COLLATE_SCRIPT PATH RNAUP_BIN ESL_SHUFFLE_BIN \
 
 : "${TOOL_REGIONS:=start_codon_region}"
 : "${TOOL_REQUIRE_LEN:=start_codon_region:63 stop_codon_region:63 tail_region:100 5UTR:>=20}"
-: "${AVOID_CALIB_SHUFFLES:=2}"
+# 03_calibrate rounds the measured wall to whole seconds; with too few shuffles the run lasts
+# only a few seconds and the (N+1)/(c+1) extrapolation inherits that rounding (+-50% at 2).
+: "${AVOID_CALIB_SHUFFLES:=20}"
 
 export TOOL_REGIONS TOOL_REQUIRE_LEN AVOID_CALIB_SHUFFLES
 

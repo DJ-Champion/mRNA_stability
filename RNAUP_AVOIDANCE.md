@@ -21,8 +21,9 @@ Pick windows with `TOOL_REGIONS` (default `start_codon_region`), set the same wa
 
 Timing test on 10 genes: `configs/datasets/human_10.yaml` (put the IDs in `data/human/gene_ids_human_10.txt`), then the
 same steps with `-d human_10`; `N_SHUFFLES=100` for a first look. Calibration runs the real code with
-`AVOID_CALIB_SHUFFLES` (default 2) shuffles and extrapolates by (N+1)/(2+1); that includes the fixed per-run cost, so it
-errs high. It writes nothing to `results/`.
+`AVOID_CALIB_SHUFFLES` (default 20) shuffles and extrapolates by (N+1)/(20+1); that includes the fixed per-run cost, so it
+errs high. 03_calibrate rounds the measured wall to whole seconds before extrapolating, so a run of only a few seconds
+(as with 2 shuffles on 8 cores) can be off by +-50%; 20 keeps that to a few percent. It writes nothing to `results/`.
 
 Local timing (RNAup 2.4.7, one core, random 63-nt windows): cost per target grows about linearly with ncRNA length,
 ~0.06 s for a 72-nt ncRNA and ~0.37 s for the 341-nt one (20 of the 34 are 72-84 nt), roughly 3-6 s for all 34. So one gene at
@@ -46,12 +47,14 @@ re-checks it, so nothing clipped reaches RNAup. Rule syntax: `region:63` exact, 
 A gene's native window and N=1000 `esl-shuffle -d` shuffles are cut into chunks of `AVOID_CHUNK` (100) targets. A work
 unit is one ncRNA against one chunk: a stream with the ncRNA first, then the chunk, `RNAup --interaction_first --no_output_file -b -d2 --noLP`
 (override with `RNAUP_ARGS`). From `(G_total = G_int + G_u_target + G_u_query)` we keep `G_total` and `G_int`;
-a pair with no interaction line is 0/0 and stays in all sums. A target header missing from RNAup's output
-fails the gene (truncation / unexpected format) instead of scoring as 0.
+a pair with no interaction line is 0/0 and stays in all sums. A target header missing from RNAup's output,
+or an energy line that does not parse, fails the gene (truncation / unexpected format) instead of scoring as 0.
 
 Units run `SLURM_CPUS_PER_TASK` at a time, longest ncRNA first, so cores stay busy despite the 72-341 nt spread.
 Checkpoints in `<tool_dir>/ckpt/<seqname>/`: the shuffled sequences (written once) and one gz per unit. A restarted
-task reuses both, so all 34 ncRNAs see the same shuffles. `AVOID_KEEP_CKPT=1` keeps them.
+task reuses both, so all 34 ncRNAs see the same shuffles. If the stored shuffles do not match the input (window
+re-extracted, `N_SHUFFLES` changed) the checkpoint is discarded and rebuilt. `AVOID_KEEP_CKPT=1` keeps them.
+Progress (`k/n units done`) streams to the SLURM log while the task runs.
 The results file is written last; its existence means the gene is done.
 
 Energies in kcal/mol; more negative = stronger binding. Robust Z =
