@@ -6,31 +6,23 @@
 #
 # Per-sequence like the other tools: one window FASTA per task, the standard
 #   02_stratify -> 03_calibrate -> 04_submit -> 05_collate
-# flow. Choose the window(s) with TOOL_REGIONS (a manifest region, default the
-# primary start-codon window); several are fine:
-#
-#   TOOL_REGIONS="start_codon_region stop_codon_region" ./bin/04_submit.sh ...
-#
-#   manifest region      output window      kept only if (TOOL_REQUIRE_LEN)
-#   start_codon_region   start_codon_pm30   exactly 63 nt  (5'UTR >= 30)
-#   stop_codon_region    stop_codon_pm30    exactly 63 nt  (3'UTR >= 30)
-#   tail_region          last_100nt         exactly 100 nt
-#   5UTR                 utr5               >= 20 nt (whole 5'UTR, length varies)
-#
-# 04_submit applies TOOL_REQUIRE_LEN to the task list and the worker re-checks it, so
-# no clipped window reaches RNAup. Shuffles are NOT seeded (as in the RNAfold tools);
+# flow. Only one window is scored: the start codon +-30 nt (manifest region
+# start_codon_region, output window start_codon_pm30), kept only if it is exactly
+# 63 nt, i.e. 5'UTR >= 30 nt. TOOL_REGIONS and TOOL_REQUIRE_LEN are fixed here (not
+# overridable); 04_submit applies them to the task list and the worker re-checks both,
+# so no other region and no clipped window reaches RNAup. Shuffles are NOT seeded (as in the RNAfold tools);
 # the worker persists them per gene so a restarted task reuses the same ones (and rebuilds
 # them if the window or N_SHUFFLES changed).
 #
-# A task works through (ncRNA, chunk of AVOID_CHUNK=100 targets) units on SLURM_CPUS_PER_TASK
-# cores, longest ncRNA first, so any core count stays busy (8 is a good start; 34 is not needed).
+# A task works through (ncRNA, chunk of AVOID_CHUNK targets) units on SLURM_CPUS_PER_TASK
+# cores, longest ncRNA first. AVOID_CHUNK=101 = native + 100 shuffles, so at the default N
+# each ncRNA is one RNAup stream (34 units; 8 cores is a good start, more than 34 is wasted).
 # Set SLURM_CPUS_PER_TASK to the same value for BOTH 03_calibrate and 04_submit. RNAup cost grows
 # about linearly with ncRNA length: ~0.06 s per 63-nt target for a 72-nt ncRNA, ~0.37 s for the
-# 341-nt one, roughly 3-6 s for all 34 (RNAup 2.4.7, one core), so ~1-1.6 core-hours per gene at N=1000.
-# Longer windows cost more (200 nt ~4x per target). Cap very long 5'UTRs with
-# TOOL_REQUIRE_LEN="... 5UTR:20-1000".
+# 341-nt one, roughly 3-6 s for all 34 (RNAup 2.4.7, one core), so ~5-10 core-minutes per gene at N=100
+# (~1-1.6 core-hours at N=1000).
 #
-# Shell/env overrides win, e.g. N_SHUFFLES=100, RNAUP_ARGS="... -w 40".
+# Shell/env overrides win, e.g. N_SHUFFLES=1000, RNAUP_ARGS="... -w 40".
 
 TOOL_NAME=rnaup_avoidance
 WORKER_SCRIPT="$PROJECT_ROOT/tools/rnaup_avoidance/worker.sh"
@@ -45,16 +37,16 @@ PATH="$(dirname "$RNAUP_BIN"):$(dirname "$ESL_SHUFFLE_BIN"):$PATH"
 : "${NCRNA_FAMILIES:=$PROJECT_ROOT/configs/ncrna/families.tsv}"
 
 : "${RNAUP_ARGS:=--interaction_first --no_output_file -b -d2 --noLP}"
-: "${N_SHUFFLES:=1000}"
+: "${N_SHUFFLES:=100}"
 : "${MIN_VALID_PERCENT:=90}"
 : "${AVOID_KEEP_CKPT:=0}"
-: "${AVOID_CHUNK:=100}"
+: "${AVOID_CHUNK:=101}"
 
 export TOOL_NAME WORKER_SCRIPT COLLATE_SCRIPT PATH RNAUP_BIN ESL_SHUFFLE_BIN \
        NCRNA_FASTA NCRNA_FAMILIES RNAUP_ARGS N_SHUFFLES MIN_VALID_PERCENT AVOID_KEEP_CKPT AVOID_CHUNK
 
-: "${TOOL_REGIONS:=start_codon_region}"
-: "${TOOL_REQUIRE_LEN:=start_codon_region:63 stop_codon_region:63 tail_region:100 5UTR:>=20}"
+TOOL_REGIONS=start_codon_region
+TOOL_REQUIRE_LEN=start_codon_region:63
 # 03_calibrate rounds the measured wall to whole seconds; with too few shuffles the run lasts
 # only a few seconds and the (N+1)/(c+1) extrapolation inherits that rounding (+-50% at 2).
 : "${AVOID_CALIB_SHUFFLES:=20}"

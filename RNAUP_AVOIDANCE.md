@@ -8,55 +8,50 @@ dinucleotide-shuffle robust Z. Tool `rnaup_avoidance`; code in `tools/rnaup_avoi
 
 Same flow as the other tools, one window FASTA per task:
 
-    ./bin/01_extract.py -d human_all           # needs start_codon_region (+ stop_codon_region, tail_region, 5UTR if used)
+    ./bin/01_extract.py -d human_all           # needs start_codon_region (the only window scored)
     ./bin/02_stratify.sh -d human_all
     export SLURM_CPUS_PER_TASK=8               # same value for calibrate and submit; any count works
     ./bin/03_calibrate.sh -d human_all -t rnaup_avoidance      # on a compute node
     ./bin/04_submit.sh -d human_all -t rnaup_avoidance
     ./bin/05_collate.sh -d human_all -t rnaup_avoidance
 
-Pick windows with `TOOL_REGIONS` (default `start_codon_region`), set the same way for calibrate and submit:
-
-    TOOL_REGIONS="start_codon_region stop_codon_region tail_region 5UTR" ./bin/04_submit.sh -d human_all -t rnaup_avoidance
-
 Timing test on 10 genes: `configs/datasets/human_10.yaml` (put the IDs in `data/human/gene_ids_human_10.txt`), then the
-same steps with `-d human_10`; `N_SHUFFLES=100` for a first look. Calibration runs the real code with
+same steps with `-d human_10`. `N_SHUFFLES` defaults to 100 (`N_SHUFFLES=1000` for a finer null). Calibration runs the real code with
 `AVOID_CALIB_SHUFFLES` (default 20) shuffles and extrapolates by (N+1)/(20+1); that includes the fixed per-run cost, so it
 errs high. 03_calibrate rounds the measured wall to whole seconds before extrapolating, so a run of only a few seconds
 (as with 2 shuffles on 8 cores) can be off by +-50%; 20 keeps that to a few percent. It writes nothing to `results/`.
 
 Local timing (RNAup 2.4.7, one core, random 63-nt windows): cost per target grows about linearly with ncRNA length,
 ~0.06 s for a 72-nt ncRNA and ~0.37 s for the 341-nt one (20 of the 34 are 72-84 nt), roughly 3-6 s for all 34. So one gene at
-N=1000 is roughly 1-1.6 core-hours (200-nt windows cost ~4x more per target). Treat these as estimates until the 10-gene run.
+N=100 is roughly 5-10 core-minutes (1-1.6 core-hours at N=1000; 200-nt windows cost ~4x more per target). Treat these as estimates until the 10-gene run.
 
-## Windows
+## Window
 
-| manifest region (`TOOL_REGIONS`) | output `window` | kept only if (`TOOL_REQUIRE_LEN`) |
-|---|---|---|
-| `start_codon_region` | `start_codon_pm30` | exactly 63 nt (5'UTR >= 30) |
-| `stop_codon_region` | `stop_codon_pm30` | exactly 63 nt (3'UTR >= 30) |
-| `tail_region` | `last_100nt` | exactly 100 nt |
-| `5UTR` | `utr5` | >= 20 nt; whole 5'UTR, length varies |
-
-`04_submit.sh` applies `TOOL_REQUIRE_LEN` to the manifest when it builds each tier's task list, and the worker
-re-checks it, so nothing clipped reaches RNAup. Rule syntax: `region:63` exact, `region:>=20` minimum,
-`region:20-1000` range. Cost grows steeply with window length; consider capping 5UTR.
+Only the start codon +-30 nt is scored: manifest region `start_codon_region`, output `window` `start_codon_pm30`,
+30 nt upstream + AUG + 30 nt downstream = 63 nt. A transcript with a 5'UTR shorter than 30 nt gives a clipped window
+and is dropped. `TOOL_REGIONS=start_codon_region` and `TOOL_REQUIRE_LEN=start_codon_region:63` are fixed in the tool
+config (env overrides are ignored); `04_submit.sh` applies them to the manifest when it builds each tier's task list,
+and the worker refuses any other region or length, so nothing else reaches RNAup or esl-shuffle.
 
 ## Method
 
-A gene's native window and N=1000 `esl-shuffle -d` shuffles are cut into chunks of `AVOID_CHUNK` (100) targets. A work
+A gene's native window and N=100 (`N_SHUFFLES`) `esl-shuffle -d` shuffles (whole window, nothing held fixed) are cut
+into chunks of `AVOID_CHUNK` (101) targets, so at N=100 each ncRNA sees all 101 in one RNAup stream. A work
 unit is one ncRNA against one chunk: a stream with the ncRNA first, then the chunk, `RNAup --interaction_first --no_output_file -b -d2 --noLP`
 (override with `RNAUP_ARGS`). From `(G_total = G_int + G_u_target + G_u_query)` we keep `G_total` and `G_int`;
 a pair with no interaction line is 0/0 and stays in all sums. A target header missing from RNAup's output,
 or an energy line that does not parse, fails the gene (truncation / unexpected format) instead of scoring as 0.
 
-Units run `SLURM_CPUS_PER_TASK` at a time, longest ncRNA first, so cores stay busy despite the 72-341 nt spread.
+Units run `SLURM_CPUS_PER_TASK` at a time, longest ncRNA first, so cores stay busy despite the 72-341 nt spread
+(34 units at N=100, so more than 34 cores is wasted).
 Checkpoints in `<tool_dir>/ckpt/<seqname>/`: the shuffled sequences (written once) and one gz per unit. A restarted
 task reuses both, so all 34 ncRNAs see the same shuffles. If the stored shuffles do not match the input (window
 re-extracted, `N_SHUFFLES` changed) the checkpoint is discarded and rebuilt. `AVOID_KEEP_CKPT=1` keeps them.
 Progress (`k/n units done`) streams to the SLURM log while the task runs.
 The results file is written last; its existence means the gene is done.
 
+The avoidance score is `avoidance_G_int_*`: `G_int`, RNAup's duplex (hybridisation) term of the predicted
+interaction, without the opening penalties. `rnaup_G_total_*` (duplex + opening) is kept only for reference.
 Energies in kcal/mol; more negative = stronger binding. Robust Z =
 `(native - median(shuffles)) / (1.4826 * MAD(shuffles))`, `NA` when MAD = 0 (same as the RNAfold worker). The null is
 shuffles of the window itself, not of the whole mRNA as in the RNAfold run, so it asks "more/less binding than

@@ -42,7 +42,7 @@ if (( n_headers != 1 )); then
     exit 1
 fi
 
-# The manifest says which region (start_codon_region, 5UTR, ...) this window is.
+# The manifest says which region this window is; avoidance.py refuses all but start_codon_region.
 region=$(awk -F'\t' -v s="$seq_name" '$1 == s { print $4; exit }' "$MANIFEST_TSV")
 [[ -n "$region" ]] || { echo "ERROR: $seq_name not in $MANIFEST_TSV" >> "$error_file"; exit 1; }
 export AVOID_REGION="$region"
