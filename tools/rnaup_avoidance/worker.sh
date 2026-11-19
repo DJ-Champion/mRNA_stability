@@ -60,12 +60,11 @@ else
     export AVOID_CKPT_DIR="$TOOL_DIR/ckpt/$seq_name"     # survives a restart
 fi
 
-# Progress goes to the SLURM log; the errors file is only written on failure.
-if ! python3 "$SRC_DIR/avoidance.py" "$fasta_file" 2>"$work/log.txt"; then
+# Progress goes to the SLURM log as it happens (tee); the errors file is only
+# written on failure. avoidance.py logs to stderr and prints nothing on stdout.
+if ! python3 "$SRC_DIR/avoidance.py" "$fasta_file" 2>&1 | tee "$work/log.txt" >&2; then
     cat "$work/log.txt" >> "$error_file"
-    cat "$work/log.txt" >&2
     echo "ERROR: avoidance.py failed for $seq_name (see $error_file)" >&2
     exit 1
 fi
-cat "$work/log.txt" >&2
 echo "Done $seq_name"

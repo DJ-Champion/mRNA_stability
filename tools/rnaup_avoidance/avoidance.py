@@ -24,8 +24,10 @@ written once to $CKPT/shuffles.fa.gz and each unit's parsed energies to
 $CKPT/<ncrna>.c<chunk>.<NNN>.tsv.gz.
 A restarted task reuses both, so every ncRNA sees the SAME shuffles
 (esl-shuffle is unseeded; regenerating them on restart would mix shuffle sets
-inside one sum). Checkpoints are deleted after the results file is written
-unless AVOID_KEEP_CKPT=1.
+inside one sum). If the stored shuffles no longer match the input (native
+window changed, different N_SHUFFLES) the whole checkpoint is discarded and
+rebuilt. Checkpoints are deleted after the results file is written unless
+AVOID_KEEP_CKPT=1.
 
 Robust Z, as tools/rnafold/worker.sh and bin/ultrafold_shuffle_summary.py:
     (native - median(shuf)) / (1.4826 * MAD(shuf));  NA when MAD == 0.
@@ -50,7 +52,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -68,8 +70,8 @@ FAMILIES = ['tRNA', 'rRNA', 'SRP', 'snRNA', 'Y_RNA', 'snoRNA']
 DEFAULT_RNAUP_ARGS = '--interaction_first --no_output_file -b -d2 --noLP'
 
 # "(((.&.))) 1,10 : 5,14 (-5.20 = -8.40 + 1.90 + 1.30)"
-ENERGY_RE = re.compile(
-    r'\(\s*([-+]?\d+\.?\d*)\s*=\s*([-+]?\d+\.?\d*)\s*\+\s*([-+]?\d+\.?\d*)\s*\+\s*([-+]?(?:\d+\.?\d*|inf|nan))\s*\)')
+_NUM = r'\s*([-+]?(?:\d+\.?\d*|inf|nan))\s*'
+ENERGY_RE = re.compile(rf'\({_NUM}={_NUM}\+{_NUM}\+{_NUM}\)')
 
 
 def read_fasta(path):
@@ -140,10 +142,11 @@ def load_ncrnas(fasta, fam_path):
 def parse_rnaup(text, target_names):
     """RNAup stdout -> {target_name: (G_total, G_int)}.
 
-    A target gets the first energy line that follows its '>' header and contains
-    '&'. Targets whose header appears with no such line are non-interacting
-    (0.0, 0.0). If a header is missing altogether the run was truncated or the
-    output format is not what we expect, and we raise rather than score it as 0.
+    A target gets the first energy line (contains '&' and '=') that follows its
+    '>' header. Targets whose header appears with no such line are
+    non-interacting (0.0, 0.0). If a header is missing altogether, or an energy
+    line does not parse, the run was truncated or the output format is not what
+    we expect, and we raise rather than score it as 0.
     """
     want = set(target_names)
     res, seen, cur = {}, set(), None
@@ -154,14 +157,15 @@ def parse_rnaup(text, target_names):
             if cur is not None:
                 seen.add(cur)
             continue
-        if cur is None or cur in res or '&' not in line:
+        if cur is None or cur in res or '&' not in line or '=' not in line:
             continue
         m = ENERGY_RE.search(line)
-        if m:
-            gt, gi = float(m.group(1)), float(m.group(2))
-            # RNAup 2.4.7 prints "(100.00 = 100.00 + x + inf)" (then ERROR) for a pair it
-            # cannot score: no interaction, so 0/0 like a missing line.
-            res[cur] = (0.0, 0.0) if (gt >= 100.0 or 'inf' in line or 'nan' in line) else (gt, gi)
+        if not m:
+            raise RuntimeError(f'cannot parse RNAup energy line for {cur}: {line.strip()[:200]}')
+        gt, gi = float(m.group(1)), float(m.group(2))
+        # RNAup 2.4.7 prints "(100.00 = 100.00 + x + inf)" (then ERROR) for a pair it
+        # cannot score: no interaction, so 0/0 like a missing line.
+        res[cur] = (0.0, 0.0) if (gt >= 100.0 or 'inf' in line or 'nan' in line) else (gt, gi)
     missing = want - seen
     if missing:
         raise RuntimeError(f'RNAup output lacks {len(missing)}/{len(want)} target headers '
@@ -211,7 +215,14 @@ def build_sequence_set(genes, esl_bin, n_shuf, min_valid, ckpt):
         grouped = {}
         for rec, s in read_fasta(path):
             grouped.setdefault(rec.rsplit('|', 1)[0], []).append(s)
-        return list(grouped.items())
+        if ([(g, seqs[0]) for g, seqs in grouped.items()] == genes
+                and all(len(seqs) == n_shuf + 1 for seqs in grouped.values())):
+            return list(grouped.items())
+        # Every unit checkpoint was computed against these shuffles, so they go too.
+        log.warning('%s does not match the input (native window or N_SHUFFLES=%d changed); '
+                    'stale checkpoint discarded', path, n_shuf)
+        for p in ckpt.iterdir():
+            p.unlink()
     out, dropped = [], []
     for g, seq in genes:
         shufs = make_shuffles(esl_bin, g, seq, n_shuf)
@@ -231,11 +242,15 @@ def build_sequence_set(genes, esl_bin, n_shuf, min_valid, ckpt):
     return out
 
 
+def unit_path(ckpt, name, chunk, ci):
+    return ckpt / f'{name}.c{chunk}.{ci:03d}.tsv.gz'
+
+
 def unit_checkpoint(ckpt, nc, chunk, ci, targets, rnaup_bin, rnaup_args, scratch):
     """One work unit: ncRNA `nc` against targets[ci*chunk:(ci+1)*chunk]. ncRNA first in the
     stream, so its accessibility is computed once per unit (~0.5 s, about 2% of a 100-target unit)."""
     name, seq, _ = nc
-    path = ckpt / f'{name}.c{chunk}.{ci:03d}.tsv.gz'
+    path = unit_path(ckpt, name, chunk, ci)
     if path.exists():
         return path
     part = targets[ci * chunk:(ci + 1) * chunk]
@@ -249,15 +264,11 @@ def unit_checkpoint(ckpt, nc, chunk, ci, targets, rnaup_bin, rnaup_args, scratch
     return path
 
 
-def checkpoint_files(ckpt, name, chunk):
-    return sorted(ckpt.glob(f'{name}.c{chunk}.*.tsv.gz'))
-
-
 def fmt(v):
     return 'NA' if v is None else f'{v:.4f}'
 
 
-def finalize(tranche, seqsets, ncs, ckpt, chunk, results_dir, raw_dir, window):
+def finalize(tranche, seqsets, ncs, ckpt, chunk, n_chunks, results_dir, raw_dir, window):
     """Sum ncRNA checkpoints -> per-gene result rows + per-shuffle sums."""
     n_seq = sum(len(s) for _, s in seqsets)
     fam_idx = {f: [k for k, nc in enumerate(ncs) if nc[2] == f] for f in FAMILIES}
@@ -272,8 +283,8 @@ def finalize(tranche, seqsets, ncs, ckpt, chunk, results_dir, raw_dir, window):
     native_pos = {starts[g]: g for g, _ in seqsets}
     for k, (name, _, family) in enumerate(ncs):
         j = -1
-        for cf in checkpoint_files(ckpt, name, chunk):
-            with gzip.open(cf, 'rt') as f:
+        for ci in range(n_chunks):      # chunk order by index, not by sorted file name
+            with gzip.open(unit_path(ckpt, name, chunk, ci), 'rt') as f:
                 for line in f:
                     j += 1
                     a, b = line.split('\t')
@@ -381,11 +392,16 @@ def main():
     workers = max(1, int(env.get('SLURM_CPUS_PER_TASK', '1')))
     log.info('%d work units (%d ncRNAs x %d chunks of <= %d) on %d worker(s)',
              len(units), len(ncs), n_chunks, chunk, workers)
+    step = max(1, len(units) // 20)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(ex.map(lambda u: unit_checkpoint(ckpt, u[0], chunk, u[1], targets, env['RNAUP_BIN'],
-                                              rnaup_args, scratch), units))
+        futs = [ex.submit(unit_checkpoint, ckpt, nc, chunk, ci, targets, env['RNAUP_BIN'], rnaup_args, scratch)
+                for nc, ci in units]
+        for k, fut in enumerate(as_completed(futs), 1):
+            fut.result()
+            if k % step == 0 or k == len(units):
+                log.info('%d/%d units done', k, len(units))
 
-    out = finalize(tranche, seqsets, ncs, ckpt, chunk, results_dir, tool_dir / 'raw_shuffles', window)
+    out = finalize(tranche, seqsets, ncs, ckpt, chunk, n_chunks, results_dir, tool_dir / 'raw_shuffles', window)
     if env.get('AVOID_KEEP_CKPT') != '1':
         shutil.rmtree(ckpt, ignore_errors=True)
     log.info('wrote %s', out)
